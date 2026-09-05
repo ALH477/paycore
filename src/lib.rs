@@ -65,7 +65,7 @@ pub use settlement::{
     refund_excess_id, EventKind, Finality, IdempotencyKey, ReversalKind, ReversalReason,
     Settlement, MAX_ID_LEN,
 };
-pub use store::{ingest, on_webhook, reconcile, CommitResult, OrderStore, PersistError};
+pub use store::{ingest, on_webhook, reconcile, CommitResult, OrderCatalog, OrderStore, PersistError};
 
 #[cfg(test)]
 mod tests;

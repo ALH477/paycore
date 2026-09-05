@@ -9,12 +9,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::machine::ApplyResult;
-use crate::order::{Order, OutboxEntry};
-use crate::settlement::{IdempotencyKey, Settlement};
-use crate::store::{CommitResult, OrderStore, PersistError};
+use crate::order::{Order, OrderStatus, OutboxEntry};
+use crate::settlement::{Finality, IdempotencyKey, Settlement};
+use crate::store::{CommitResult, OrderCatalog, OrderStore, PersistError};
 
 #[derive(Clone, Debug)]
 pub struct DeadLetter {
@@ -27,7 +28,7 @@ pub struct DeadLetter {
 struct Inner {
     orders: HashMap<Uuid, Order>,
     processed: HashSet<IdempotencyKey>,
-    outbox: Vec<OutboxEntry>,
+    outbox: Vec<(OutboxEntry, Option<OffsetDateTime>)>,
     dead: Vec<DeadLetter>,
 }
 
@@ -69,7 +70,7 @@ impl MemoryStore {
     }
 
     pub fn outbox(&self) -> Vec<OutboxEntry> {
-        self.lock().outbox.clone()
+        self.lock().outbox.iter().map(|(e, _)| e.clone()).collect()
     }
 
     pub fn dead_letters(&self) -> Vec<DeadLetter> {
@@ -92,7 +93,7 @@ impl OrderStore for MemoryStore {
             return Err(PersistError::UnknownOrder(result.order.id));
         }
         g.processed.insert(result.key);
-        g.outbox.extend(result.effects);
+        g.outbox.extend(result.effects.into_iter().map(|e| (e, None)));
         g.orders.insert(result.order.id, result.order);
         Ok(CommitResult::Applied)
     }
@@ -110,6 +111,51 @@ impl OrderStore for MemoryStore {
             why,
         });
         Ok(())
+    }
+}
+
+#[async_trait]
+impl OrderCatalog for MemoryStore {
+    async fn insert(&self, order: Order) -> Result<(), PersistError> {
+        MemoryStore::insert(self, order)
+    }
+
+    async fn claim_outbox(&self, limit: usize) -> Result<Vec<OutboxEntry>, PersistError> {
+        Ok(self
+            .lock()
+            .outbox
+            .iter()
+            .filter(|(_, drained_at)| drained_at.is_none())
+            .take(limit)
+            .map(|(e, _)| e.clone())
+            .collect())
+    }
+
+    async fn mark_drained(&self, id: Uuid, at: OffsetDateTime) -> Result<(), PersistError> {
+        if let Some((_, drained_at)) = self.lock().outbox.iter_mut().find(|(e, _)| e.id == id) {
+            *drained_at = Some(at);
+        }
+        Ok(())
+    }
+
+    async fn ids_needing_clock(&self, now: OffsetDateTime) -> Result<Vec<Uuid>, PersistError> {
+        Ok(self
+            .lock()
+            .orders
+            .values()
+            .filter(|order| {
+                let expired_unpaid = matches!(
+                    order.status,
+                    OrderStatus::Pending | OrderStatus::AwaitingPayment | OrderStatus::Underpaid
+                ) && order.expires_at.is_some_and(|end| end <= now);
+                let chargeback_due = order.attempts.iter().any(|a| {
+                    a.chargeback_window_ends.is_some_and(|end| end <= now)
+                        && !matches!(a.finality, Some(Finality::Final))
+                });
+                expired_unpaid || chargeback_due
+            })
+            .map(|order| order.id)
+            .collect())
     }
 }
 
@@ -213,5 +259,31 @@ mod tests {
         let ids: Vec<_> =
             loaded.attempts.iter().map(|a| a.provider_invoice_id.as_str()).collect();
         assert_eq!(ids, ["inv-A", "inv-B"]);
+    }
+
+    #[test]
+    fn claimed_outbox_skips_drained_rows() {
+        let store = MemoryStore::new();
+        store.insert(order(100)).unwrap();
+        let mm = m();
+        pollster::block_on(ingest(&mm, &store, P, &[obs(100, "tx-a")], b"", t(10))).unwrap();
+        let first = pollster::block_on(store.claim_outbox(32)).unwrap();
+        assert!(!first.is_empty());
+        let id = first[0].id;
+        pollster::block_on(store.mark_drained(id, t(11))).unwrap();
+        let second = pollster::block_on(store.claim_outbox(32)).unwrap();
+        assert!(second.iter().all(|e| e.id != id));
+    }
+
+    #[test]
+    fn clock_ids_include_expired_unpaid_orders() {
+        let store = MemoryStore::new();
+        let mut o = order(100);
+        o.expires_at = Some(t(50));
+        store.insert(o).unwrap();
+        let ids = pollster::block_on(store.ids_needing_clock(t(60))).unwrap();
+        assert_eq!(ids, vec![oid()]);
+        let none = pollster::block_on(store.ids_needing_clock(t(40))).unwrap();
+        assert!(none.is_empty());
     }
 }

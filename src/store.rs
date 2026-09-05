@@ -61,6 +61,14 @@ pub trait OrderStore: Send + Sync {
     ) -> Result<(), PersistError>;
 }
 
+#[async_trait]
+pub trait OrderCatalog: OrderStore {
+    async fn insert(&self, order: Order) -> Result<(), PersistError>;
+    async fn claim_outbox(&self, limit: usize) -> Result<Vec<crate::order::OutboxEntry>, PersistError>;
+    async fn mark_drained(&self, id: Uuid, at: OffsetDateTime) -> Result<(), PersistError>;
+    async fn ids_needing_clock(&self, now: OffsetDateTime) -> Result<Vec<Uuid>, PersistError>;
+}
+
 /// Rejects events a driver should never have produced, before they reach
 /// the machine or the index.
 fn validate(event: &Settlement, expected_provider: &str) -> Result<(), String> {
