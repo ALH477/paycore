@@ -19,8 +19,10 @@ for correctness.
 | `backend.rs` | `PaymentBackend`, `VerifiedBody` |
 | `policy.rs` | per-rail confirmation depth and chargeback windows |
 | `machine.rs` | `apply`, `mark_fulfilled`, `on_clock` |
-| `store.rs` | `OrderStore`, `ingest`, `on_webhook`, `reconcile` |
+| `store.rs` | `OrderStore`, `OrderCatalog`, `ingest`, `on_webhook`, `reconcile` |
 | `memory.rs` | `MemoryStore` — unique index + one-transaction commit |
+| `crates/paycore-sqlite` | SQLite `OrderStore` + `OrderCatalog` (file or in-memory) |
+| `crates/paycore-worker` | `drain_once` (outbox) and `tick_clock` |
 
 ## Invariants
 
@@ -135,8 +137,28 @@ copy is a second source of truth that a driver can disagree with.
 `commit` is one transaction: insert `processed_events` (conflict →
 `Duplicate`, roll back), update `orders`, replace that order's `attempts`
 rows in `seq` order, insert `outbox`. `MemoryStore` is the executable
-form of this. A SQL store that updates `orders` without rewriting
-`attempts` is wrong.
+form of this. `paycore-sqlite` is the same protocol on a real unique
+index (`SqliteStore::open` / `open_in_memory`). A SQL store that updates
+`orders` without rewriting `attempts` is wrong. `processed_events.kind`
+is `EventKind::as_str()` (`Observed`, `Clock`, `Fulfill`, …).
+
+Construct orders with `Order::try_new` (or `Order::new`, which panics on
+negative `due`). `due.minor < 0` is `InvalidAttempt`.
+
+## Worker
+
+`paycore-worker::drain_once` claims undrained outbox rows:
+
+- `MayFulfill` → `mark_fulfilled` then commit. `FulfillRejected` drains
+  the row without shipping (stale instruction after a reversal).
+- `RefundExcess` → `PaymentBackend::refund`, then `ingest` of
+  `Settlement::Refunded`. `Unavailable` leaves the row for retry.
+  `RefundIdempotent` still ingests, so a crash after the rail refunded
+  but before drain still converges.
+- `UnexpectedFunds` is never auto-drained. A human has to look.
+- Other effects are informational and get marked drained.
+
+`tick_clock` loads `ids_needing_clock` and applies `on_clock`.
 
 ## Writing a driver
 

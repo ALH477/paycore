@@ -196,6 +196,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "paycore",
+ "paycore-worker",
  "pollster",
  "rusqlite",
  "serde_json",
