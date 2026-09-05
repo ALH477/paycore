@@ -1,0 +1,28 @@
+[package]
+name = "paycore"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "AGPL-3.0-or-later"
+description = "Provider-agnostic payment orchestration contract and order state machine."
+readme = "README.md"
+keywords = ["payments", "orchestration", "idempotency", "settlement"]
+categories = ["finance"]
+# TODO(release): set `repository` before the first crates.io publish.
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2.5"
+thiserror = "1"
+# Deliberately NOT pinned with `=`. This is a library: an exact pin propagates
+# to every downstream graph and holds back patch releases, advisories included.
+time = { version = "0.3", features = ["serde", "macros"] }
+uuid = { version = "1", features = ["v5", "serde"] }
+
+[dev-dependencies]
+# Lets the test suite block on the async store port without a hand-rolled
+# waker, which is what allows `#![forbid(unsafe_code)]` at the crate root.
+pollster = "1"
