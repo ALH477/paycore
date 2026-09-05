@@ -23,6 +23,7 @@ for correctness.
 | `memory.rs` | `MemoryStore` — unique index + one-transaction commit |
 | `crates/paycore-sqlite` | SQLite `OrderStore` + `OrderCatalog` (file or in-memory) |
 | `crates/paycore-worker` | `drain_once` (outbox) and `tick_clock` |
+| `crates/paycore-btcpay` | BTCPay HMAC + Greenfield pull for Observed |
 
 ## Invariants
 
