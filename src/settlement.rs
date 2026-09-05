@@ -79,6 +79,37 @@ pub enum EventKind {
     Clock,
 }
 
+impl EventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EventKind::Observed => "Observed",
+            EventKind::Reversed => "Reversed",
+            EventKind::Refunded => "Refunded",
+            EventKind::Disputed => "Disputed",
+            EventKind::DisputeResolved => "DisputeResolved",
+            EventKind::Fulfill => "Fulfill",
+            EventKind::Expired => "Expired",
+            EventKind::Failed => "Failed",
+            EventKind::Clock => "Clock",
+        }
+    }
+
+    pub fn from_str_exact(s: &str) -> Option<Self> {
+        match s {
+            "Observed" => Some(EventKind::Observed),
+            "Reversed" => Some(EventKind::Reversed),
+            "Refunded" => Some(EventKind::Refunded),
+            "Disputed" => Some(EventKind::Disputed),
+            "DisputeResolved" => Some(EventKind::DisputeResolved),
+            "Fulfill" => Some(EventKind::Fulfill),
+            "Expired" => Some(EventKind::Expired),
+            "Failed" => Some(EventKind::Failed),
+            "Clock" => Some(EventKind::Clock),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Settlement {
     /// Cumulative funds observed against the invoice.
@@ -348,4 +379,27 @@ pub fn refund_excess_id(
             &attempt_net.currency,
         ]),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventKind;
+
+    #[test]
+    fn event_kind_as_str_is_stable() {
+        use EventKind::*;
+        for (kind, token) in [
+            (Observed, "Observed"),
+            (Reversed, "Reversed"),
+            (Refunded, "Refunded"),
+            (Disputed, "Disputed"),
+            (DisputeResolved, "DisputeResolved"),
+            (Fulfill, "Fulfill"),
+            (Expired, "Expired"),
+            (Failed, "Failed"),
+            (Clock, "Clock"),
+        ] {
+            assert_eq!(kind.as_str(), token);
+        }
+    }
 }
