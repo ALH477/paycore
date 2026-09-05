@@ -243,10 +243,7 @@ fn fulfil_is_sticky_and_gated() {
     assert!(after.effects.iter().all(|e| e.effect != Effect::MayFulfill));
 
     let under = mm.apply(&order(100), &obs(30, "tx-b", 6, 10), t(50)).unwrap().order;
-    assert!(matches!(
-        mm.mark_fulfilled(&under, t(60)),
-        Err(MachineError::FulfillRejected { .. })
-    ));
+    assert!(matches!(mm.mark_fulfilled(&under, t(60)), Err(MachineError::FulfillRejected { .. })));
 }
 
 #[test]
@@ -489,11 +486,12 @@ fn regression_late_payment_on_expired_invoice_is_recorded() {
     let late = mm.apply(&expired, &obs(100, "tx-late", 6, 70), t(70)).unwrap();
     assert_eq!(late.order.status, OrderStatus::Expired, "still expired");
     assert_eq!(late.order.observed().unwrap(), usd(100), "but the money is on the books");
-    assert_eq!(att(&late.order).observed_total, usd(100), "recorded on the attempt the event named");
-    assert!(late
-        .effects
-        .iter()
-        .any(|e| matches!(e.effect, Effect::UnexpectedFunds { .. })));
+    assert_eq!(
+        att(&late.order).observed_total,
+        usd(100),
+        "recorded on the attempt the event named"
+    );
+    assert!(late.effects.iter().any(|e| matches!(e.effect, Effect::UnexpectedFunds { .. })));
 }
 
 /// HIGH: `provider` is index material; varying it replayed one clawback
@@ -554,9 +552,7 @@ fn regression_ach_bounce_on_a_fulfilled_order_is_recalled() {
     // Reversed for more than was ever paid — a driver miscount, or a second
     // clawback the invoice's own history can't otherwise explain. The
     // remainder asked of the customer must never exceed what they owe.
-    let bounced = mm
-        .apply(&ful, &rev(400, "r1", ReversalKind::AchReturn, 30), t(30))
-        .unwrap();
+    let bounced = mm.apply(&ful, &rev(400, "r1", ReversalKind::AchReturn, 30), t(30)).unwrap();
 
     assert_eq!(bounced.order.status, OrderStatus::Recalled, "shipped but unfunded");
     assert!(!bounced.order.reversal_closed, "an ACH return is recoverable");
@@ -567,7 +563,11 @@ fn regression_ach_bounce_on_a_fulfilled_order_is_recalled() {
         Effect::AwaitRemainder { missing } => Some(missing.minor),
         _ => None,
     });
-    assert_eq!(missing, Some(100), "never ask for more than due, regardless of the reversal's size");
+    assert_eq!(
+        missing,
+        Some(100),
+        "never ask for more than due, regardless of the reversal's size"
+    );
 
     // And they do.
     let repaid = mm.apply(&bounced.order, &obs(500, "tx2", 6, 40), t(40)).unwrap().order;

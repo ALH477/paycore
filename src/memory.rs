@@ -300,8 +300,7 @@ mod tests {
         o.open_attempt(Attempt::same_currency("b", "inv-B", usd(60)).unwrap()).unwrap();
         store.insert(o).unwrap();
         let loaded = pollster::block_on(store.load(oid())).unwrap();
-        let ids: Vec<_> =
-            loaded.attempts.iter().map(|a| a.provider_invoice_id.as_str()).collect();
+        let ids: Vec<_> = loaded.attempts.iter().map(|a| a.provider_invoice_id.as_str()).collect();
         assert_eq!(ids, ["inv-A", "inv-B"]);
     }
 

@@ -134,9 +134,7 @@ fn sqlite_enforces_foreign_keys() {
     let ev = obs(100, "tx-a");
     // No order row was ever inserted, so the processed_events FK has nothing
     // to point at and the whole commit must fail rather than orphan a row.
-    let r = pollster::block_on(store.commit(
-        m().apply(&seed(), &ev, t(10)).unwrap(),
-    ));
+    let r = pollster::block_on(store.commit(m().apply(&seed(), &ev, t(10)).unwrap()));
     assert!(r.is_err(), "a commit against a missing order row must not succeed");
 }
 
@@ -163,9 +161,7 @@ fn sqlite_clock_sweep_selects_only_due_orders() {
     pollster::block_on(OrderCatalog::insert(&store, expiring)).unwrap();
 
     let mut quiet = Order::new(Uuid::from_u128(0x5555), usd(100), t(0));
-    quiet
-        .open_attempt(Attempt::same_currency(P, "inv-quiet", usd(100)).unwrap())
-        .unwrap();
+    quiet.open_attempt(Attempt::same_currency(P, "inv-quiet", usd(100)).unwrap()).unwrap();
     quiet.status = OrderStatus::AwaitingPayment;
     pollster::block_on(OrderCatalog::insert(&store, quiet)).unwrap();
 

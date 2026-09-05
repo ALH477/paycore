@@ -51,12 +51,9 @@ fn payload_provider_field_is_ignored() {
 /// ingested nothing for every payment: no events, no error, no dead letter.
 #[test]
 fn payment_webhook_refuses_to_decode_without_a_pull() {
-    for kind in [
-        "InvoiceSettled",
-        "InvoiceReceivedPayment",
-        "InvoicePaymentSettled",
-        "InvoiceProcessing",
-    ] {
+    for kind in
+        ["InvoiceSettled", "InvoiceReceivedPayment", "InvoicePaymentSettled", "InvoiceProcessing"]
+    {
         let body = format!(
             r#"{{"type": "{kind}", "invoiceId": "inv-3", "timestamp": 1000, "metadata": {{"orderId": "11111111-1111-1111-1111-111111111111"}}}}"#
         );
@@ -81,7 +78,9 @@ fn get_invoice_settled_is_observed_final() {
     }"#;
     let settlement = settlement_from_invoice(raw, t(9_000)).unwrap();
     match settlement {
-        Settlement::Observed { provider, provider_invoice_id, observed_total, finality, .. } => {
+        Settlement::Observed {
+            provider, provider_invoice_id, observed_total, finality, ..
+        } => {
             assert_eq!(provider, "btcpay");
             assert_eq!(provider_invoice_id, "inv-4");
             assert_eq!(observed_total.minor, 100_000);

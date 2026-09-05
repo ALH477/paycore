@@ -105,7 +105,11 @@ fn regression_two_invoices_are_both_counted_toward_the_order() {
     o2.status = OrderStatus::AwaitingPayment;
     let c = mm.apply(&o2, &obs_p(70, "a-tx", "inv-A", P, 10), t(10)).unwrap().order;
     let d = mm.apply(&c, &obs_p(30, "b-tx", "inv-B", P, 20), t(20)).unwrap().order;
-    assert_eq!(d.observed().unwrap(), usd(100), "70 + 30 across two invoices adds up to the full due");
+    assert_eq!(
+        d.observed().unwrap(),
+        usd(100),
+        "70 + 30 across two invoices adds up to the full due"
+    );
     assert_eq!(d.status, OrderStatus::Paid);
 }
 
@@ -164,13 +168,17 @@ fn regression_ns_derived_is_not_the_rfc4122_dns_namespace() {
     let dns_ns = Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap();
     let via_dns_ns = Uuid::new_v5(&dns_ns, &{
         let mut v = Vec::new();
-        for p in ["refund-excess", &oid().to_string(), P, "inv-1", "150", "USD", "150", "0", "USD"] {
+        for p in ["refund-excess", &oid().to_string(), P, "inv-1", "150", "USD", "150", "0", "USD"]
+        {
             v.extend_from_slice(&(p.len() as u64).to_be_bytes());
             v.extend_from_slice(p.as_bytes());
         }
         v
     });
-    assert_ne!(id, via_dns_ns, "NS_DERIVED must be a private namespace, not the well-known DNS one");
+    assert_ne!(
+        id, via_dns_ns,
+        "NS_DERIVED must be a private namespace, not the well-known DNS one"
+    );
 }
 
 // ---- F9: a due == 0 order is Paid on arrival and ships immediately --------
@@ -200,7 +208,12 @@ impl OrderStore for NoOrderStore {
         self.ok.fetch_add(1, AOrd::SeqCst);
         Ok(CommitResult::Applied)
     }
-    async fn dead_letter(&self, _e: &Settlement, _raw: &[u8], _why: String) -> Result<(), PersistError> {
+    async fn dead_letter(
+        &self,
+        _e: &Settlement,
+        _raw: &[u8],
+        _why: String,
+    ) -> Result<(), PersistError> {
         self.dead.fetch_add(1, AOrd::SeqCst);
         Ok(())
     }
@@ -216,7 +229,11 @@ fn regression_unknown_order_is_a_hard_error_not_a_dead_letter() {
         matches!(r, Err(PersistError::UnknownOrder(_))),
         "a race with invoice creation must surface as an error, not a swallowed 2xx"
     );
-    assert_eq!(store.dead.load(AOrd::SeqCst), 0, "not a permanent data problem — must not be dead-lettered");
+    assert_eq!(
+        store.dead.load(AOrd::SeqCst),
+        0,
+        "not a permanent data problem — must not be dead-lettered"
+    );
     assert_eq!(store.ok.load(AOrd::SeqCst), 0);
 }
 

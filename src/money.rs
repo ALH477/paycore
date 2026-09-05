@@ -37,19 +37,13 @@ impl Money {
     /// starts mid-history.
     pub fn sub(&self, other: &Money) -> Result<Money, MachineError> {
         self.same_currency(other)?;
-        let minor = self
-            .minor
-            .checked_sub(other.minor)
-            .ok_or(MachineError::AmountOverflow)?;
+        let minor = self.minor.checked_sub(other.minor).ok_or(MachineError::AmountOverflow)?;
         Ok(Money::new(minor, self.currency.clone()))
     }
 
     pub fn add(&self, other: &Money) -> Result<Money, MachineError> {
         self.same_currency(other)?;
-        let minor = self
-            .minor
-            .checked_add(other.minor)
-            .ok_or(MachineError::AmountOverflow)?;
+        let minor = self.minor.checked_add(other.minor).ok_or(MachineError::AmountOverflow)?;
         Ok(Money::new(minor, self.currency.clone()))
     }
 

@@ -68,10 +68,7 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
         now: OffsetDateTime,
     ) -> Result<ApplyResult, MachineError> {
         if event.order_id() != order.id {
-            return Err(MachineError::WrongOrder {
-                expected: event.order_id(),
-                actual: order.id,
-            });
+            return Err(MachineError::WrongOrder { expected: event.order_id(), actual: order.id });
         }
 
         // Every `amount` on the wire is a magnitude, never a signed
@@ -107,9 +104,7 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
             // Recorded, never silently swallowed. A late on-chain payment
             // past invoice expiry is routine; the money exists whether or
             // not the invoice does.
-            Settlement::Observed { provider, provider_invoice_id, observed_total, .. }
-                if ended =>
-            {
+            Settlement::Observed { provider, provider_invoice_id, observed_total, .. } if ended => {
                 let attempt = next.attempt_mut(provider, provider_invoice_id)?;
                 attempt.observed_total = attempt.observed_total.max_join(observed_total)?;
                 attempt.last_tx_ref = Some(event.tx_ref().to_string());
@@ -174,10 +169,8 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
                     next.reversal_closed = true;
                 }
 
-                let mut fx = vec![Effect::RecordLoss {
-                    reason: reason.clone(),
-                    amount: amount.clone(),
-                }];
+                let mut fx =
+                    vec![Effect::RecordLoss { reason: reason.clone(), amount: amount.clone() }];
                 if next.fulfilled_at.is_some() {
                     fx.push(Effect::RecallFulfillment {
                         why: format!("{:?}:{}", reason.kind, reason.code),
@@ -224,13 +217,12 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
             Settlement::Disputed { provider, provider_invoice_id, deadline, amount, .. }
                 if !ended =>
             {
-                let attempt =
-                    order.attempt(provider, provider_invoice_id).ok_or_else(|| {
-                        MachineError::UnknownAttempt {
-                            provider: provider.clone(),
-                            provider_invoice_id: provider_invoice_id.clone(),
-                        }
-                    })?;
+                let attempt = order.attempt(provider, provider_invoice_id).ok_or_else(|| {
+                    MachineError::UnknownAttempt {
+                        provider: provider.clone(),
+                        provider_invoice_id: provider_invoice_id.clone(),
+                    }
+                })?;
                 if amount.currency != order.due.currency
                     && amount.currency != attempt.quoted.currency
                 {
@@ -340,12 +332,7 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
             // Late non-funding event on a finished order: ack, change nothing.
             _ if ended => (Status::Set(order.status), vec![]),
 
-            ev => {
-                return Err(MachineError::Illegal {
-                    from: order.status,
-                    event: ev.name(),
-                })
-            }
+            ev => return Err(MachineError::Illegal { from: order.status, event: ev.name() }),
         };
 
         next.status = match status {
@@ -355,11 +342,7 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
 
         next.updated_at = now;
 
-        Ok(ApplyResult {
-            effects: to_outbox(&key, next.id, raw_effects),
-            order: next,
-            key,
-        })
+        Ok(ApplyResult { effects: to_outbox(&key, next.id, raw_effects), order: next, key })
     }
 
     /// Explicit command. `Fulfilled` is absorbing in `derive_status` via
@@ -404,7 +387,11 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
 
             let key = order_key(order, EventKind::Clock, format!("expire:{}", order.id));
             next.updated_at = now;
-            return Some(ApplyResult { effects: to_outbox(&key, next.id, effects), order: next, key });
+            return Some(ApplyResult {
+                effects: to_outbox(&key, next.id, effects),
+                order: next,
+                key,
+            });
         }
 
         let mut promoted: Vec<(String, String)> = Vec::new();

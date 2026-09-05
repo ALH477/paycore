@@ -100,12 +100,8 @@ pub trait OrderCatalog: OrderStore {
     ///
     /// A held row is still there, still undrained, and still the human's work
     /// queue. It is only out of the *worker's* way.
-    async fn hold_row(
-        &self,
-        id: Uuid,
-        at: OffsetDateTime,
-        why: String,
-    ) -> Result<(), PersistError>;
+    async fn hold_row(&self, id: Uuid, at: OffsetDateTime, why: String)
+        -> Result<(), PersistError>;
 
     async fn ids_needing_clock(&self, now: OffsetDateTime) -> Result<Vec<Uuid>, PersistError>;
 }

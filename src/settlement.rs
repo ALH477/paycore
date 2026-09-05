@@ -22,7 +22,9 @@ pub const MAX_ID_LEN: usize = 200;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Finality {
-    Provisional { confirmations: u32 },
+    Provisional {
+        confirmations: u32,
+    },
     /// Cards are never `Final` from a webhook. Only `on_clock` promotes
     /// them, once the chargeback window closes.
     Final,
@@ -331,13 +333,8 @@ impl IdempotencyKey {
     pub fn derived_uuid(&self, purpose: &[&str]) -> Uuid {
         let kind = format!("{:?}", self.kind);
         let oid = self.order_id.to_string();
-        let mut parts: Vec<&str> = vec![
-            &oid,
-            &self.provider,
-            &kind,
-            &self.provider_invoice_id,
-            &self.tx_ref,
-        ];
+        let mut parts: Vec<&str> =
+            vec![&oid, &self.provider, &kind, &self.provider_invoice_id, &self.tx_ref];
         parts.extend_from_slice(purpose);
         Uuid::new_v5(&NS_DERIVED, &canonical(&parts))
     }

@@ -13,8 +13,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use paycore::{
-    ApplyResult, Attempt, CommitResult, Effect, EventKind, Finality, IdempotencyKey, Money,
-    Order, OrderCatalog, OrderStatus, OrderStore, OutboxEntry, PersistError, Settlement,
+    ApplyResult, Attempt, CommitResult, Effect, EventKind, Finality, IdempotencyKey, Money, Order,
+    OrderCatalog, OrderStatus, OrderStore, OutboxEntry, PersistError, Settlement,
 };
 
 const SCHEMA: &str = "
@@ -119,7 +119,8 @@ impl SqliteStore {
         // WAL so a reader is not blocked by the writer, and a bounded wait
         // rather than an instant SQLITE_BUSY when two processes overlap.
         // `journal_mode` is a no-op on an in-memory database.
-        let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))
+        let _: String = conn
+            .pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))
             .unwrap_or_else(|_| "memory".to_string());
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
@@ -135,11 +136,9 @@ impl SqliteStore {
     /// plain token rather than a JSON-quoted one. Test-only observation point.
     pub fn status_token(&self, id: Uuid) -> Option<String> {
         let conn = self.lock();
-        conn.query_row(
-            "SELECT status FROM orders WHERE id = ?1",
-            params![id.to_string()],
-            |r| r.get::<_, String>(0),
-        )
+        conn.query_row("SELECT status FROM orders WHERE id = ?1", params![id.to_string()], |r| {
+            r.get::<_, String>(0)
+        })
         .ok()
     }
 
@@ -147,8 +146,8 @@ impl SqliteStore {
     /// production code drains the store, not this counter.
     pub fn dead_letter_count(&self) -> usize {
         let conn = self.lock();
-        conn.query_row("SELECT COUNT(*) FROM dead_letters", [], |r| r.get::<_, i64>(0))
-            .unwrap_or(0) as usize
+        conn.query_row("SELECT COUNT(*) FROM dead_letters", [], |r| r.get::<_, i64>(0)).unwrap_or(0)
+            as usize
     }
 }
 
@@ -171,11 +170,7 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
         "UPDATE orders SET status = substr(status, 2, length(status) - 2) \
          WHERE status LIKE '\"%\"'",
     )?;
-    for (column, decl) in [
-        ("provider", "TEXT"),
-        ("held_at", "INTEGER"),
-        ("held_why", "TEXT"),
-    ] {
+    for (column, decl) in [("provider", "TEXT"), ("held_at", "INTEGER"), ("held_why", "TEXT")] {
         if !have.iter().any(|c| c == column) {
             conn.execute_batch(&format!("ALTER TABLE outbox ADD COLUMN {column} {decl}"))?;
         }
@@ -356,7 +351,8 @@ fn replace_attempts(
 ) -> Result<(), PersistError> {
     conn.execute("DELETE FROM attempts WHERE order_id = ?1", params![order_id]).map_err(other)?;
     for (seq, a) in attempts.iter().enumerate() {
-        let finality_s = a.finality.as_ref().map(serde_json::to_string).transpose().map_err(other)?;
+        let finality_s =
+            a.finality.as_ref().map(serde_json::to_string).transpose().map_err(other)?;
         conn.execute(
             "INSERT INTO attempts (order_id, seq, provider, provider_invoice_id, quoted_minor, \
              quoted_currency, covers_minor, covers_currency, observed_total_minor, \

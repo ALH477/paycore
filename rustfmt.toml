@@ -1,0 +1,7 @@
+# The repository was hand-formatted before this file existed. These two
+# settings are the closest fit to that style: a wider line than the 80-column
+# default, and `Max` so rustfmt stops exploding short calls, struct literals,
+# and match arms across several lines. Adopting it moved ~66 hunks; everything
+# after this commit should be `cargo fmt --check` clean.
+max_width = 100
+use_small_heuristics = "Max"

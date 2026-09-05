@@ -42,11 +42,7 @@ impl PaymentBackend for FakeBackend {
     async fn create_invoice(&self, _req: CreateInvoice) -> Result<Invoice, PayError> {
         unimplemented!("not used")
     }
-    async fn verify(
-        &self,
-        _h: &[(String, String)],
-        _b: &[u8],
-    ) -> Result<VerifiedBody, PayError> {
+    async fn verify(&self, _h: &[(String, String)], _b: &[u8]) -> Result<VerifiedBody, PayError> {
         unimplemented!("not used")
     }
     fn decode(&self, _b: &VerifiedBody) -> Result<Vec<Settlement>, PayError> {
@@ -56,10 +52,7 @@ impl PaymentBackend for FakeBackend {
         self.refunds.lock().unwrap().push(req);
         Ok(())
     }
-    async fn fetch_settlements(
-        &self,
-        _since: OffsetDateTime,
-    ) -> Result<Vec<Settlement>, PayError> {
+    async fn fetch_settlements(&self, _since: OffsetDateTime) -> Result<Vec<Settlement>, PayError> {
         Ok(vec![])
     }
 }

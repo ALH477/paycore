@@ -30,13 +30,13 @@ pub struct BtcPayBackend<G: Greenfield> {
 }
 
 impl<G: Greenfield> BtcPayBackend<G> {
-    pub fn new(store_id: impl Into<String>, secret: WebhookSecret, token: ApiToken, http: G) -> Self {
-        Self {
-            store_id: store_id.into(),
-            secret,
-            token,
-            http,
-        }
+    pub fn new(
+        store_id: impl Into<String>,
+        secret: WebhookSecret,
+        token: ApiToken,
+        http: G,
+    ) -> Self {
+        Self { store_id: store_id.into(), secret, token, http }
     }
 
     pub fn name(&self) -> &'static str {
@@ -48,15 +48,10 @@ impl<G: Greenfield> BtcPayBackend<G> {
     /// Whether a pull payment named `marker` already exists on this store.
     /// Archived ones count: a completed refund is still a refund.
     async fn pull_payment_exists(&self, marker: &str) -> Result<bool, PayError> {
-        let path = format!(
-            "/api/v1/stores/{}/pull-payments?includeArchived=true",
-            self.store_id
-        );
+        let path = format!("/api/v1/stores/{}/pull-payments?includeArchived=true", self.store_id);
         let raw = self.http.get(&path).await?;
         let items: Vec<Value> = serde_json::from_slice(&raw).map_err(parse_err)?;
-        Ok(items
-            .iter()
-            .any(|i| i.get("name").and_then(|v| v.as_str()) == Some(marker)))
+        Ok(items.iter().any(|i| i.get("name").and_then(|v| v.as_str()) == Some(marker)))
     }
 }
 
@@ -97,18 +92,11 @@ impl<G: Greenfield> PaymentBackend for BtcPayBackend<G> {
         let path = format!("/api/v1/stores/{}/invoices", self.store_id);
         let raw = self.http.post(&path, &body).await?;
         let parsed: Value = serde_json::from_slice(&raw).map_err(parse_err)?;
-        let id = parsed
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let id = parsed.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if id.is_empty() {
             return Err(PayError::Other(anyhow::anyhow!("empty invoice id")));
         }
-        let checkout_url = parsed
-            .get("checkoutLink")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+        let checkout_url = parsed.get("checkoutLink").and_then(|v| v.as_str()).map(str::to_string);
         Ok(Invoice {
             order_id: req.order_id,
             provider: "btcpay".into(),
@@ -178,10 +166,7 @@ impl<G: Greenfield> PaymentBackend for BtcPayBackend<G> {
     /// letting a single undecodable invoice abort the whole sweep is
     /// acceptable. `ingest` already takes the same line for events; this now
     /// matches it.
-    async fn fetch_settlements(
-        &self,
-        since: OffsetDateTime,
-    ) -> Result<Vec<Settlement>, PayError> {
+    async fn fetch_settlements(&self, since: OffsetDateTime) -> Result<Vec<Settlement>, PayError> {
         const PAGE: usize = 100;
         let now = OffsetDateTime::now_utc();
         let mut out = Vec::new();
@@ -240,11 +225,8 @@ where
     let needs_pull = webhook_needs_pull(verified.as_bytes())?;
     // `decode` rejects the pull-required types outright, so ask it only for
     // the endings it can actually translate.
-    let mut events = if needs_pull {
-        Vec::new()
-    } else {
-        decode_webhook(verified.as_bytes(), now)?
-    };
+    let mut events =
+        if needs_pull { Vec::new() } else { decode_webhook(verified.as_bytes(), now)? };
     if needs_pull {
         if let Some(id) = webhook_invoice_id(verified.as_bytes())? {
             let id = safe_invoice_id(&id)?;

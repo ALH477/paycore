@@ -49,12 +49,8 @@ fn observation_ref(id: &str, status: &str, paid_minor: i64) -> String {
     hex::encode(Sha256::digest(&buf))
 }
 
-const NEEDS_PULL: &[&str] = &[
-    "InvoiceSettled",
-    "InvoiceReceivedPayment",
-    "InvoicePaymentSettled",
-    "InvoiceProcessing",
-];
+const NEEDS_PULL: &[&str] =
+    &["InvoiceSettled", "InvoiceReceivedPayment", "InvoicePaymentSettled", "InvoiceProcessing"];
 
 #[derive(Deserialize)]
 struct Metadata {
@@ -117,9 +113,7 @@ fn require_order_id(metadata: &Option<Metadata>) -> Result<Uuid, PayError> {
 /// timestamp the provider did not send, and it errs towards keeping funds
 /// reversible for longer rather than shorter.
 fn at_from_unix(timestamp: Option<i64>, fallback: OffsetDateTime) -> OffsetDateTime {
-    timestamp
-        .and_then(|t| OffsetDateTime::from_unix_timestamp(t).ok())
-        .unwrap_or(fallback)
+    timestamp.and_then(|t| OffsetDateTime::from_unix_timestamp(t).ok()).unwrap_or(fallback)
 }
 
 /// Translate a BTCPay webhook body into zero or more settlements.

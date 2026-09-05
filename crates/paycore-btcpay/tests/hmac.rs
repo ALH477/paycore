@@ -40,7 +40,10 @@ fn btcpay_sig_rejects_wrong_mac() {
     assert!(matches!(
         verify_btcpay_sig(
             b"test-secret",
-            &[("btcpay-sig".into(), "sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into())],
+            &[(
+                "btcpay-sig".into(),
+                "sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()
+            )],
             b"{}",
         ),
         Err(PayError::BadSignature)
@@ -49,10 +52,7 @@ fn btcpay_sig_rejects_wrong_mac() {
 
 #[test]
 fn btcpay_sig_rejects_missing_header() {
-    assert!(matches!(
-        verify_btcpay_sig(b"test-secret", &[], b"{}"),
-        Err(PayError::BadSignature)
-    ));
+    assert!(matches!(verify_btcpay_sig(b"test-secret", &[], b"{}"), Err(PayError::BadSignature)));
 }
 
 #[test]

@@ -53,9 +53,7 @@ pub mod policy;
 pub mod settlement;
 pub mod store;
 
-pub use backend::{
-    CreateInvoice, Invoice, PayError, PaymentBackend, RefundRequest, VerifiedBody,
-};
+pub use backend::{CreateInvoice, Invoice, PayError, PaymentBackend, RefundRequest, VerifiedBody};
 pub use machine::{ApplyResult, MachineError, OrderMachine};
 pub use memory::{DeadLetter, MemoryStore};
 pub use money::Money;
@@ -65,7 +63,9 @@ pub use settlement::{
     refund_excess_id, EventKind, Finality, IdempotencyKey, ReversalKind, ReversalReason,
     Settlement, MAX_ID_LEN,
 };
-pub use store::{ingest, on_webhook, reconcile, CommitResult, OrderCatalog, OrderStore, PersistError};
+pub use store::{
+    ingest, on_webhook, reconcile, CommitResult, OrderCatalog, OrderStore, PersistError,
+};
 
 #[cfg(test)]
 mod tests;

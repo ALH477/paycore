@@ -74,10 +74,7 @@ impl OrderStatus {
     /// Statuses a payment can still arrive against and change the outcome.
     /// Shared with the store's clock sweep so the two cannot disagree.
     pub fn is_awaiting_funds(self) -> bool {
-        matches!(
-            self,
-            OrderStatus::Pending | OrderStatus::AwaitingPayment | OrderStatus::Underpaid
-        )
+        matches!(self, OrderStatus::Pending | OrderStatus::AwaitingPayment | OrderStatus::Underpaid)
     }
 
     /// Nothing further changes these. Funds arriving against one are still
@@ -289,10 +286,7 @@ impl Order {
                 actual: attempt.covers.currency.clone(),
             });
         }
-        if self
-            .attempts
-            .iter()
-            .any(|a| a.matches(&attempt.provider, &attempt.provider_invoice_id))
+        if self.attempts.iter().any(|a| a.matches(&attempt.provider, &attempt.provider_invoice_id))
         {
             return Err(MachineError::InvalidAttempt { why: "attempt already open" });
         }
@@ -309,13 +303,12 @@ impl Order {
         provider: &str,
         provider_invoice_id: &str,
     ) -> Result<&mut Attempt, MachineError> {
-        self.attempts
-            .iter_mut()
-            .find(|a| a.matches(provider, provider_invoice_id))
-            .ok_or_else(|| MachineError::UnknownAttempt {
+        self.attempts.iter_mut().find(|a| a.matches(provider, provider_invoice_id)).ok_or_else(
+            || MachineError::UnknownAttempt {
                 provider: provider.to_string(),
                 provider_invoice_id: provider_invoice_id.to_string(),
-            })
+            },
+        )
     }
 
     /// Fold a per-attempt rail-currency quantity into the order's currency.
@@ -400,8 +393,12 @@ pub fn derive_status(o: &Order) -> Result<OrderStatus, MachineError> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Effect {
     MayFulfill,
-    HoldFulfillment { why: String },
-    RecallFulfillment { why: String },
+    HoldFulfillment {
+        why: String,
+    },
+    RecallFulfillment {
+        why: String,
+    },
     /// Worker calls `PaymentBackend::refund` with this id against this
     /// invoice, then emits `Settlement::Refunded` on success so
     /// `refunded_total` advances. `amount` is in the rail's currency —
@@ -412,9 +409,17 @@ pub enum Effect {
         amount: Money,
         refund_id: Uuid,
     },
-    AwaitRemainder { missing: Money },
-    OpenDispute { deadline: OffsetDateTime, amount: Money },
-    RecordLoss { reason: ReversalReason, amount: Money },
+    AwaitRemainder {
+        missing: Money,
+    },
+    OpenDispute {
+        deadline: OffsetDateTime,
+        amount: Money,
+    },
+    RecordLoss {
+        reason: ReversalReason,
+        amount: Money,
+    },
     MarkSettled,
     /// Money arrived against an order that had already ended, or was left
     /// stranded on one that expired part-paid. Never silent: a late on-chain

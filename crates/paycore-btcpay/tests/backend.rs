@@ -3,8 +3,7 @@ use std::sync::Mutex;
 
 use paycore::{
     Attempt, CreateInvoice, Finality, MemoryStore, Money, Order, OrderMachine, OrderStatus,
-    OrderStore, RefundRequest,
-    PayError, PaymentBackend, StaticPolicy,
+    OrderStore, PayError, PaymentBackend, RefundRequest, StaticPolicy,
 };
 use paycore_btcpay::greenfield::Greenfield;
 use paycore_btcpay::hmac_sig::hmac_sha256;
@@ -30,7 +29,8 @@ impl FakeHttp {
         Self {
             gets: Mutex::new(HashMap::new()),
             posts: Mutex::new(Vec::new()),
-            post_resp: br#"{"id":"inv-new","checkoutLink":"https://pay.example/i/inv-new"}"#.to_vec(),
+            post_resp: br#"{"id":"inv-new","checkoutLink":"https://pay.example/i/inv-new"}"#
+                .to_vec(),
             post_err: None,
             get_panic: false,
         }
@@ -43,19 +43,11 @@ impl Greenfield for FakeHttp {
         if self.get_panic {
             panic!("unexpected GET {path}");
         }
-        self.gets
-            .lock()
-            .unwrap()
-            .get(path)
-            .cloned()
-            .ok_or(PayError::Unavailable)
+        self.gets.lock().unwrap().get(path).cloned().ok_or(PayError::Unavailable)
     }
 
     async fn post(&self, path: &str, json_body: &[u8]) -> Result<Vec<u8>, PayError> {
-        self.posts
-            .lock()
-            .unwrap()
-            .push((path.to_string(), json_body.to_vec()));
+        self.posts.lock().unwrap().push((path.to_string(), json_body.to_vec()));
         if let Some(err) = &self.post_err {
             if err == "unavailable" {
                 return Err(PayError::Unavailable);
@@ -79,10 +71,7 @@ fn t(s: i64) -> OffsetDateTime {
 
 fn signed(body: &[u8]) -> (Vec<(String, String)>, &[u8]) {
     let mac = hmac_sha256(SECRET, body);
-    let h = vec![(
-        "BTCPay-Sig".into(),
-        format!("sha256={}", hex::encode(mac)),
-    )];
+    let h = vec![("BTCPay-Sig".into(), format!("sha256={}", hex::encode(mac)))];
     (h, body)
 }
 
@@ -117,14 +106,7 @@ fn bad_sig_does_not_get_invoice() {
     let store = MemoryStore::new();
     store.insert(seed_order()).unwrap();
     let body = br#"{"type":"InvoiceSettled","invoiceId":"inv-xyz"}"#;
-    let err = pollster::block_on(on_btcpay_webhook(
-        &backend,
-        &machine(),
-        &store,
-        &[],
-        body,
-        t(10),
-    ));
+    let err = pollster::block_on(on_btcpay_webhook(&backend, &machine(), &store, &[], body, t(10)));
     assert!(matches!(err, Err(PayError::BadSignature)), "{err:?}");
 }
 
@@ -149,15 +131,8 @@ fn invoice_settled_pulls_observed() {
     store.insert(seed_order()).unwrap();
     let body = br#"{"type":"InvoiceSettled","invoiceId":"inv-xyz","timestamp":10}"#;
     let (headers, body) = signed(body);
-    pollster::block_on(on_btcpay_webhook(
-        &backend,
-        &machine(),
-        &store,
-        &headers,
-        body,
-        t(10),
-    ))
-    .unwrap();
+    pollster::block_on(on_btcpay_webhook(&backend, &machine(), &store, &headers, body, t(10)))
+        .unwrap();
     let order = pollster::block_on(store.load(oid())).unwrap();
     assert_eq!(order.net().unwrap().minor, 100_000);
     assert_eq!(order.status, OrderStatus::Paid);
@@ -188,15 +163,8 @@ fn decode_ignores_payload_provider() {
         "timestamp": 10
     }"#;
     let (headers, body) = signed(body);
-    pollster::block_on(on_btcpay_webhook(
-        &backend,
-        &machine(),
-        &store,
-        &headers,
-        body,
-        t(10),
-    ))
-    .unwrap();
+    pollster::block_on(on_btcpay_webhook(&backend, &machine(), &store, &headers, body, t(10)))
+        .unwrap();
     let order = pollster::block_on(store.load(oid())).unwrap();
     assert_eq!(order.status, OrderStatus::Paid);
     assert_eq!(order.attempts[0].provider, P);
@@ -215,10 +183,7 @@ fn create_invoice_posts_order_id_not_token() {
     let invoice = pollster::block_on(backend.create_invoice(req)).unwrap();
     assert_eq!(invoice.provider, P);
     assert_eq!(invoice.provider_invoice_id, "inv-new");
-    assert_eq!(
-        invoice.checkout_url.as_deref(),
-        Some("https://pay.example/i/inv-new")
-    );
+    assert_eq!(invoice.checkout_url.as_deref(), Some("https://pay.example/i/inv-new"));
 
     let posts = backend.http.posts.lock().unwrap();
     assert_eq!(posts.len(), 1);
@@ -226,10 +191,7 @@ fn create_invoice_posts_order_id_not_token() {
     let body = std::str::from_utf8(&posts[0].1).unwrap();
     assert!(!body.contains(TOKEN), "{body}");
     let json: serde_json::Value = serde_json::from_slice(&posts[0].1).unwrap();
-    assert_eq!(
-        json["metadata"]["orderId"].as_str(),
-        Some("11111111-1111-1111-1111-111111111111")
-    );
+    assert_eq!(json["metadata"]["orderId"].as_str(), Some("11111111-1111-1111-1111-111111111111"));
 }
 
 #[test]
@@ -268,7 +230,8 @@ fn an_invoice_paid_in_two_payments_reaches_paid() {
     let store = MemoryStore::new();
     store.insert(seed_order()).unwrap();
 
-    let (headers, body) = signed(br#"{"type":"InvoiceReceivedPayment","invoiceId":"inv-xyz","timestamp":10}"#);
+    let (headers, body) =
+        signed(br#"{"type":"InvoiceReceivedPayment","invoiceId":"inv-xyz","timestamp":10}"#);
     pollster::block_on(on_btcpay_webhook(&backend, &machine(), &store, &headers, body, t(10)))
         .unwrap();
     let half = pollster::block_on(store.load(oid())).unwrap();
@@ -286,7 +249,8 @@ fn an_invoice_paid_in_two_payments_reaches_paid() {
         }"#
         .to_vec(),
     );
-    let (headers, body) = signed(br#"{"type":"InvoiceSettled","invoiceId":"inv-xyz","timestamp":20}"#);
+    let (headers, body) =
+        signed(br#"{"type":"InvoiceSettled","invoiceId":"inv-xyz","timestamp":20}"#);
     pollster::block_on(on_btcpay_webhook(&backend, &machine(), &store, &headers, body, t(20)))
         .unwrap();
 
@@ -318,7 +282,8 @@ fn replaying_one_invoice_state_is_still_idempotent() {
     let backend = backend(http);
     let store = MemoryStore::new();
     store.insert(seed_order()).unwrap();
-    let (headers, body) = signed(br#"{"type":"InvoiceSettled","invoiceId":"inv-xyz","timestamp":10}"#);
+    let (headers, body) =
+        signed(br#"{"type":"InvoiceSettled","invoiceId":"inv-xyz","timestamp":10}"#);
     for _ in 0..3 {
         pollster::block_on(on_btcpay_webhook(&backend, &machine(), &store, &headers, body, t(10)))
             .unwrap();

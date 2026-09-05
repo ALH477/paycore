@@ -35,8 +35,5 @@ fn no_f64_in_source() {
 #[test]
 fn from_minor_btc() {
     assert_eq!(from_minor(100_000, "BTC").unwrap(), "0.001");
-    assert_eq!(
-        to_minor(&from_minor(100_000, "BTC").unwrap(), "BTC").unwrap(),
-        100_000
-    );
+    assert_eq!(to_minor(&from_minor(100_000, "BTC").unwrap(), "BTC").unwrap(), 100_000);
 }

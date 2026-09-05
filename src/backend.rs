@@ -133,8 +133,5 @@ pub trait PaymentBackend: Send + Sync {
 
     /// Pull what the provider believes happened since `since`. Webhooks are
     /// rumours; this is how you find out the truth.
-    async fn fetch_settlements(
-        &self,
-        since: OffsetDateTime,
-    ) -> Result<Vec<Settlement>, PayError>;
+    async fn fetch_settlements(&self, since: OffsetDateTime) -> Result<Vec<Settlement>, PayError>;
 }
