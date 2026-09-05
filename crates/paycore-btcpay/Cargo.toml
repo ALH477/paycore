@@ -1,0 +1,22 @@
+[package]
+name = "paycore-btcpay"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+paycore = { path = "../.." }
+anyhow = "1"
+async-trait = "0.1"
+hex = "0.4"
+hmac = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "1"
+time = { version = "0.3", features = ["serde"] }
+uuid = { version = "1", features = ["serde"] }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+pollster = "1"

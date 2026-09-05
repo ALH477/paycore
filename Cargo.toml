@@ -28,5 +28,5 @@ uuid = { version = "1", features = ["v5", "serde"] }
 pollster = "1"
 
 [workspace]
-members = [".", "crates/paycore-sqlite", "crates/paycore-worker"]
+members = [".", "crates/paycore-sqlite", "crates/paycore-worker", "crates/paycore-btcpay"]
 resolver = "2"
