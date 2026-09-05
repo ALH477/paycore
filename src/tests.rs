@@ -698,6 +698,15 @@ fn regression_refund_is_keyed_on_refund_id_not_tx_ref() {
     assert_eq!(after.outstanding_excess().unwrap(), usd(0));
 }
 
+#[test]
+fn negative_due_is_rejected() {
+    assert!(matches!(
+        Order::try_new(oid(), usd(-1), t(0)),
+        Err(MachineError::InvalidAttempt { .. })
+    ));
+    assert_eq!(Order::try_new(oid(), usd(0), t(0)).unwrap().status, OrderStatus::Paid);
+}
+
 // ---------------------------------------------------------------------------
 // Store double. `pollster::block_on` drives the async port; the crate itself
 // stays runtime-agnostic and `unsafe`-free.

@@ -203,7 +203,10 @@ pub struct Order {
 }
 
 impl Order {
-    pub fn new(id: Uuid, due: Money, now: OffsetDateTime) -> Self {
+    pub fn try_new(id: Uuid, due: Money, now: OffsetDateTime) -> Result<Self, MachineError> {
+        if due.minor < 0 {
+            return Err(MachineError::InvalidAttempt { why: "due must not be negative" });
+        }
         let mut o = Self {
             id,
             status: OrderStatus::Pending,
@@ -216,8 +219,12 @@ impl Order {
             fulfilled_at: None,
             updated_at: now,
         };
-        o.status = derive_status(&o).unwrap_or(OrderStatus::Pending);
-        o
+        o.status = derive_status(&o)?;
+        Ok(o)
+    }
+
+    pub fn new(id: Uuid, due: Money, now: OffsetDateTime) -> Self {
+        Self::try_new(id, due, now).expect("due must not be negative")
     }
 
     /// Register an invoice against this order. Call it when `create_invoice`
