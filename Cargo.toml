@@ -8,7 +8,7 @@ description = "Provider-agnostic payment orchestration contract and order state 
 readme = "README.md"
 keywords = ["payments", "orchestration", "idempotency", "settlement"]
 categories = ["finance"]
-# TODO(release): set `repository` before the first crates.io publish.
+repository = "https://github.com/ALH477/paycore"
 
 [dependencies]
 anyhow = "1"
