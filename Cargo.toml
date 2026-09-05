@@ -26,3 +26,7 @@ uuid = { version = "1", features = ["v5", "serde"] }
 # Lets the test suite block on the async store port without a hand-rolled
 # waker, which is what allows `#![forbid(unsafe_code)]` at the crate root.
 pollster = "1"
+
+[workspace]
+members = [".", "crates/paycore-sqlite", "crates/paycore-worker"]
+resolver = "2"
