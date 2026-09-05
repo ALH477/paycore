@@ -169,3 +169,68 @@ fn sqlite_clock_sweep_selects_only_due_orders() {
     let due = pollster::block_on(store.ids_needing_clock(t(60))).unwrap();
     assert_eq!(due, vec![oid()], "only the order whose deadline has passed");
 }
+
+/// F32: opening a second invoice on a row that already exists must survive
+/// a load, not require a second `insert` (which would fail on the PK).
+#[test]
+fn sqlite_open_attempt_unknown_order() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    let err = pollster::block_on(
+        store.open_attempt(oid(), Attempt::same_currency(P, "inv-1", usd(100)).unwrap()),
+    );
+    assert!(matches!(err, Err(PersistError::UnknownOrder(_))));
+}
+
+#[test]
+fn sqlite_open_attempt_persists_a_second_rail() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    pollster::block_on(store.insert(seed())).unwrap();
+    pollster::block_on(store.open_attempt(
+        oid(),
+        Attempt::same_currency("btcpay", "inv-btc", usd(60)).unwrap(),
+    ))
+    .unwrap();
+
+    let loaded = pollster::block_on(store.load(oid())).unwrap();
+    let ids: Vec<_> = loaded.attempts.iter().map(|a| a.provider_invoice_id.as_str()).collect();
+    assert_eq!(ids, ["inv-1", "inv-btc"]);
+}
+
+#[test]
+fn sqlite_open_attempt_is_not_an_upsert() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    pollster::block_on(store.insert(seed())).unwrap();
+    pollster::block_on(ingest(&m(), &store, P, &[obs(40, "tx-a")], b"", t(10))).unwrap();
+    let err = pollster::block_on(store.open_attempt(
+        oid(),
+        Attempt::same_currency(P, "inv-1", usd(100)).unwrap(),
+    ));
+    assert!(err.is_err());
+    let o = pollster::block_on(store.load(oid())).unwrap();
+    assert_eq!(o.attempt(P, "inv-1").unwrap().observed_total, usd(40));
+}
+
+#[test]
+fn sqlite_failover_second_rail_funds_the_same_order() {
+    let store = SqliteStore::open_in_memory().unwrap();
+    pollster::block_on(store.insert(seed())).unwrap();
+    pollster::block_on(ingest(&m(), &store, P, &[obs(40, "tx-a")], b"", t(10))).unwrap();
+    pollster::block_on(store.open_attempt(
+        oid(),
+        Attempt::same_currency("btcpay", "inv-btc", usd(60)).unwrap(),
+    ))
+    .unwrap();
+    let btc = Settlement::Observed {
+        order_id: oid(),
+        provider: "btcpay".into(),
+        provider_invoice_id: "inv-btc".into(),
+        observed_total: usd(60),
+        tx_ref: "chain-1".into(),
+        finality: Finality::Provisional { confirmations: 6 },
+        at: t(20),
+    };
+    pollster::block_on(ingest(&m(), &store, "btcpay", &[btc], b"", t(20))).unwrap();
+    let o = pollster::block_on(store.load(oid())).unwrap();
+    assert_eq!(o.status, OrderStatus::Paid);
+    assert_eq!(o.net().unwrap(), usd(100));
+}

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::backend::{PayError, PaymentBackend};
 use crate::machine::{ApplyResult, OrderMachine};
-use crate::order::Order;
+use crate::order::{Attempt, Order};
 use crate::policy::FulfillmentPolicy;
 use crate::settlement::{Settlement, MAX_ID_LEN};
 
@@ -64,6 +64,27 @@ pub trait OrderStore: Send + Sync {
 #[async_trait]
 pub trait OrderCatalog: OrderStore {
     async fn insert(&self, order: Order) -> Result<(), PersistError>;
+
+    /// Register a new invoice on an order that already exists.
+    ///
+    /// This is failover. A processor dropping you costs an invoice, not a
+    /// customer: the order keeps its `due` and everything already collected,
+    /// and the new rail is another attempt folded into the same total. It is
+    /// also re-invoicing after an expiry, and part-paying across two rails.
+    ///
+    /// Separate from `commit` because opening an invoice is not a settlement
+    /// event — no driver reported it, so it has no idempotency key and emits
+    /// no effects. Call it when `create_invoice` succeeds, and commit it in the
+    /// same transaction as whatever you store alongside the invoice: `apply`
+    /// rejects any event naming an attempt that does not exist yet, so a
+    /// webhook that overtakes this write is dead-lettered.
+    ///
+    /// Appends, preserving `seq`. Refund allocation walks attempts in order,
+    /// so reordering them would change the `refund_id` for an unchanged
+    /// ledger state. Re-opening an attempt that is already on the order is
+    /// `InvalidAttempt`, not an upsert.
+    async fn open_attempt(&self, order_id: Uuid, attempt: Attempt)
+        -> Result<(), PersistError>;
 
     /// Undrained, unheld rows this worker is allowed to act on, oldest first.
     ///

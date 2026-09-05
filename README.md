@@ -21,6 +21,7 @@ for correctness.
 | `machine.rs` | `apply`, `mark_fulfilled`, `on_clock` |
 | `store.rs` | `OrderStore`, `OrderCatalog`, `ingest`, `on_webhook`, `reconcile` |
 | `memory.rs` | `MemoryStore` — unique index + one-transaction commit |
+| `examples/failover.rs` | two rails, one order — `cargo run --example failover` |
 | `crates/paycore-sqlite` | SQLite `OrderStore` + `OrderCatalog` (file or in-memory) |
 | `crates/paycore-worker` | `drain_once` (outbox) and `tick_clock` |
 | `crates/paycore-btcpay` | BTCPay HMAC + Greenfield pull for Observed |
@@ -154,6 +155,19 @@ is `EventKind::as_str()` (`Observed`, `Clock`, `Fulfill`, …), and
 `orders.status` is `OrderStatus::as_str()` — plain tokens, not JSON, so the
 clock sweep can filter them in SQL.
 
+The catalog has two other writes. `insert` seeds a new order (invoices
+already `open_attempt`ed on the aggregate). Adding a rail later is
+`OrderCatalog::open_attempt`: load, append, write the order row and its
+attempts back. It is not a settlement — no driver reported it, so it has
+no idempotency key and emits no effects. `apply` rejects any event naming
+an attempt that does not exist yet, so a webhook that overtakes this write
+is dead-lettered. Re-opening an attempt already on the order is
+`InvalidAttempt`, not an upsert: refund allocation walks `seq`, and an
+upsert would also wipe totals already collected. `insert` rejects an
+existing id, and `commit` only accepts `ApplyResult` from `apply` /
+`mark_fulfilled` / `on_clock`, none of which open invoices — so this is
+the only persistence path for failover.
+
 A duplicate is specifically a *key* conflict on `processed_events`. Treating
 any constraint violation as one also swallows a foreign-key failure from an
 event whose order row does not exist, and reports it as "already applied".
@@ -167,6 +181,37 @@ refund calculation on that order fail.
 `refunded_total` is bounded by what the attempt still holds. It is subtracted
 from the excess, so an inflated report would drive `outstanding_excess` to zero
 and quietly cancel money still owed to the payer.
+
+## Failover
+
+A processor dropping you costs an invoice, not a customer. The order keeps
+`due` and everything already collected; the new rail is another attempt
+folded into the same total. `covers / quoted` is the exchange rate, locked
+when the invoice is created — `apply` is pure, so a live rate would make
+the ledger unreproducible.
+
+Verified by `cargo run --example failover` ($40 on a card rail, then
+0.0015 BTC covering the remaining $60, one `due`):
+
+```rust
+// first rail: mutate the aggregate, then insert
+order.open_attempt(Attempt::same_currency("acquirer", "inv-card", usd(10_000))?)?;
+store.insert(order)?;
+
+// later, on the same store — not a load-mutate-reinsert
+pollster::block_on(store.open_attempt(
+    order_id,
+    Attempt::new(
+        "btcpay",
+        "inv-btc",
+        Money::new(150_000, "BTC"),
+        usd(6_000),
+    )?,
+))?;
+```
+
+Call `OrderCatalog::open_attempt` when `create_invoice` succeeds, in the
+same transaction as whatever you store alongside the invoice.
 
 ## Worker
 

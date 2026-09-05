@@ -515,6 +515,27 @@ impl OrderCatalog for SqliteStore {
         Ok(())
     }
 
+    /// Load, append, and write the order row and its attempts back in one
+    /// transaction, so a crash cannot leave an invoice half-registered.
+    async fn open_attempt(&self, order_id: Uuid, attempt: Attempt) -> Result<(), PersistError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(other)?;
+
+        let mut order = load_order(&tx, order_id)?;
+        order
+            .open_attempt(attempt)
+            .map_err(|e| other(anyhow::anyhow!(e)))?;
+
+        let updated = update_order_row(&tx, &order)?;
+        if updated == 0 {
+            return Err(PersistError::UnknownOrder(order_id));
+        }
+        replace_attempts(&tx, &order_id.to_string(), &order.attempts)?;
+
+        tx.commit().map_err(other)?;
+        Ok(())
+    }
+
     async fn pending_outbox(
         &self,
         provider: &str,

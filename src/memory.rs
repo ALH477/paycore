@@ -146,6 +146,17 @@ impl OrderCatalog for MemoryStore {
         MemoryStore::insert(self, order)
     }
 
+    async fn open_attempt(
+        &self,
+        order_id: Uuid,
+        attempt: crate::order::Attempt,
+    ) -> Result<(), PersistError> {
+        let mut g = self.lock();
+        let order = g.orders.get_mut(&order_id).ok_or(PersistError::UnknownOrder(order_id))?;
+        order.open_attempt(attempt).map_err(|e| PersistError::Other(anyhow::anyhow!(e)))?;
+        Ok(())
+    }
+
     async fn pending_outbox(
         &self,
         provider: &str,
@@ -328,5 +339,74 @@ mod tests {
         assert_eq!(ids, vec![oid()]);
         let none = pollster::block_on(store.ids_needing_clock(t(40))).unwrap();
         assert!(none.is_empty());
+    }
+
+    /// F32: adding a rail is a store write, not a mutation you hope to
+    /// re-`insert`. `insert` rejects an existing id, so without this the
+    /// only way to fail over was to pre-open every rail at order creation.
+    #[test]
+    fn open_attempt_persists_a_second_rail_on_an_existing_order() {
+        let store = MemoryStore::new();
+        store.insert(order(100)).unwrap();
+        pollster::block_on(store.open_attempt(
+            oid(),
+            Attempt::same_currency("btcpay", "inv-btc", usd(60)).unwrap(),
+        ))
+        .unwrap();
+        let loaded = pollster::block_on(store.load(oid())).unwrap();
+        let ids: Vec<_> = loaded.attempts.iter().map(|a| a.provider_invoice_id.as_str()).collect();
+        assert_eq!(ids, ["inv-1", "inv-btc"]);
+    }
+
+    #[test]
+    fn open_attempt_is_not_an_upsert() {
+        let store = MemoryStore::new();
+        store.insert(order(100)).unwrap();
+        pollster::block_on(ingest(&m(), &store, P, &[obs(40, "tx-a")], b"", t(10))).unwrap();
+        let err = pollster::block_on(store.open_attempt(
+            oid(),
+            Attempt::same_currency(P, "inv-1", usd(100)).unwrap(),
+        ));
+        assert!(err.is_err(), "re-opening the same invoice must fail");
+        let o = pollster::block_on(store.load(oid())).unwrap();
+        assert_eq!(
+            o.attempt(P, "inv-1").unwrap().observed_total,
+            usd(40),
+            "a failed re-open must not wipe what was already collected"
+        );
+    }
+
+    #[test]
+    fn open_attempt_unknown_order() {
+        let store = MemoryStore::new();
+        let err = pollster::block_on(
+            store.open_attempt(oid(), Attempt::same_currency(P, "inv-1", usd(100)).unwrap()),
+        );
+        assert!(matches!(err, Err(PersistError::UnknownOrder(_))));
+    }
+
+    #[test]
+    fn failover_second_rail_funds_the_same_order() {
+        let store = MemoryStore::new();
+        store.insert(order(100)).unwrap();
+        pollster::block_on(ingest(&m(), &store, P, &[obs(40, "tx-a")], b"", t(10))).unwrap();
+        pollster::block_on(store.open_attempt(
+            oid(),
+            Attempt::same_currency("btcpay", "inv-btc", usd(60)).unwrap(),
+        ))
+        .unwrap();
+        let btc = Settlement::Observed {
+            order_id: oid(),
+            provider: "btcpay".into(),
+            provider_invoice_id: "inv-btc".into(),
+            observed_total: usd(60),
+            tx_ref: "chain-1".into(),
+            finality: Finality::Provisional { confirmations: 6 },
+            at: t(20),
+        };
+        pollster::block_on(ingest(&m(), &store, "btcpay", &[btc], b"", t(20))).unwrap();
+        let o = pollster::block_on(store.load(oid())).unwrap();
+        assert_eq!(o.status, OrderStatus::Paid);
+        assert_eq!(o.net().unwrap(), usd(100));
     }
 }
