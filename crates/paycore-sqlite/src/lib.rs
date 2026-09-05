@@ -18,7 +18,7 @@ use paycore::{
 };
 
 const SCHEMA: &str = "
-CREATE TABLE orders (
+CREATE TABLE IF NOT EXISTS orders (
   id TEXT PRIMARY KEY,
   status TEXT NOT NULL,
   currency TEXT NOT NULL,
@@ -30,7 +30,7 @@ CREATE TABLE orders (
   fulfilled_at INTEGER,
   updated_at INTEGER NOT NULL
 );
-CREATE TABLE attempts (
+CREATE TABLE IF NOT EXISTS attempts (
   order_id TEXT NOT NULL REFERENCES orders(id),
   seq INTEGER NOT NULL,
   provider TEXT NOT NULL,
@@ -48,7 +48,7 @@ CREATE TABLE attempts (
   chargeback_window_ends INTEGER,
   PRIMARY KEY (order_id, provider, provider_invoice_id)
 );
-CREATE TABLE processed_events (
+CREATE TABLE IF NOT EXISTS processed_events (
   order_id TEXT NOT NULL REFERENCES orders(id),
   provider TEXT NOT NULL,
   kind TEXT NOT NULL,
@@ -57,14 +57,21 @@ CREATE TABLE processed_events (
   applied_at INTEGER NOT NULL,
   PRIMARY KEY (order_id, provider, kind, provider_invoice_id, tx_ref)
 );
-CREATE TABLE outbox (
+CREATE TABLE IF NOT EXISTS outbox (
   id TEXT PRIMARY KEY,
   order_id TEXT NOT NULL REFERENCES orders(id),
+  provider TEXT,               -- Effect::scope() provider; NULL = any worker
   effect TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  drained_at INTEGER
+  drained_at INTEGER,
+  held_at INTEGER,             -- parked for a human; out of the claim window
+  held_why TEXT
 );
-CREATE TABLE dead_letters (
+CREATE INDEX IF NOT EXISTS outbox_claim
+  ON outbox (drained_at, held_at, created_at);
+CREATE INDEX IF NOT EXISTS orders_expiry ON orders (expires_at);
+CREATE INDEX IF NOT EXISTS attempts_chargeback ON attempts (chargeback_window_ends);
+CREATE TABLE IF NOT EXISTS dead_letters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   order_id TEXT,
   event TEXT NOT NULL,
@@ -94,19 +101,46 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     pub fn open(path: &str) -> anyhow::Result<Self> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Self::from_conn(Connection::open(path)?)
     }
 
     pub fn open_in_memory() -> anyhow::Result<Self> {
-        let conn = Connection::open_in_memory()?;
+        Self::from_conn(Connection::open_in_memory()?)
+    }
+
+    /// The one place a connection is prepared, so the file-backed and
+    /// in-memory constructors cannot drift apart — which is how the missing
+    /// `IF NOT EXISTS` survived: every test took the in-memory path, where a
+    /// schema is only ever created once.
+    fn from_conn(conn: Connection) -> anyhow::Result<Self> {
+        // SQLite defaults `foreign_keys` OFF, which would leave every
+        // REFERENCES clause in `SCHEMA` decorative.
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        // WAL so a reader is not blocked by the writer, and a bounded wait
+        // rather than an instant SQLITE_BUSY when two processes overlap.
+        // `journal_mode` is a no-op on an in-memory database.
+        let _: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))
+            .unwrap_or_else(|_| "memory".to_string());
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self { conn: Mutex::new(conn) })
     }
 
     fn lock(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The raw `orders.status` cell, so a test can assert the column holds a
+    /// plain token rather than a JSON-quoted one. Test-only observation point.
+    pub fn status_token(&self, id: Uuid) -> Option<String> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT status FROM orders WHERE id = ?1",
+            params![id.to_string()],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
     }
 
     /// Number of rows ever dead-lettered. Test-only observation point —
@@ -116,6 +150,37 @@ impl SqliteStore {
         conn.query_row("SELECT COUNT(*) FROM dead_letters", [], |r| r.get::<_, i64>(0))
             .unwrap_or(0) as usize
     }
+}
+
+/// `CREATE TABLE IF NOT EXISTS` leaves an older database with its old columns,
+/// so every column added after the first release needs adding by hand. Now that
+/// reopening an existing file actually works, this is the difference between an
+/// upgrade and a crash on the first claim.
+fn migrate(conn: &Connection) -> anyhow::Result<()> {
+    let mut have = Vec::new();
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(outbox)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for row in rows {
+            have.push(row?);
+        }
+    }
+    // `status` used to round-trip through serde_json, so an older database
+    // holds `"Paid"` (with the quotes) in a text column.
+    conn.execute_batch(
+        "UPDATE orders SET status = substr(status, 2, length(status) - 2) \
+         WHERE status LIKE '\"%\"'",
+    )?;
+    for (column, decl) in [
+        ("provider", "TEXT"),
+        ("held_at", "INTEGER"),
+        ("held_why", "TEXT"),
+    ] {
+        if !have.iter().any(|c| c == column) {
+            conn.execute_batch(&format!("ALTER TABLE outbox ADD COLUMN {column} {decl}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn load_order(conn: &Connection, id: Uuid) -> Result<Order, PersistError> {
@@ -154,7 +219,8 @@ fn load_order(conn: &Connection, id: Uuid) -> Result<Order, PersistError> {
         Err(e) => return Err(other(e)),
     };
 
-    let status: OrderStatus = serde_json::from_str(&status_s).map_err(other)?;
+    let status = OrderStatus::from_str_exact(&status_s)
+        .ok_or_else(|| other(anyhow::anyhow!("unknown order status {status_s:?}")))?;
     let attempts = load_attempts(conn, &id_s)?;
 
     Ok(Order {
@@ -239,7 +305,7 @@ fn load_attempts(conn: &Connection, order_id: &str) -> Result<Vec<Attempt>, Pers
 }
 
 fn insert_order_row(conn: &Connection, order: &Order) -> Result<(), PersistError> {
-    let status_s = serde_json::to_string(&order.status).map_err(other)?;
+    let status_s = order.status.as_str();
     conn.execute(
         "INSERT INTO orders (id, status, currency, due_minor, saw_closing_reversal, \
          reversal_closed, dispute_open, expires_at, fulfilled_at, updated_at) \
@@ -262,7 +328,7 @@ fn insert_order_row(conn: &Connection, order: &Order) -> Result<(), PersistError
 }
 
 fn update_order_row(conn: &Connection, order: &Order) -> Result<usize, PersistError> {
-    let status_s = serde_json::to_string(&order.status).map_err(other)?;
+    let status_s = order.status.as_str();
     conn.execute(
         "UPDATE orders SET status=?1, currency=?2, due_minor=?3, saw_closing_reversal=?4, \
          reversal_closed=?5, dispute_open=?6, expires_at=?7, fulfilled_at=?8, updated_at=?9 \
@@ -319,7 +385,7 @@ fn replace_attempts(
     Ok(())
 }
 
-/// `claim_outbox` reconstructs an `OutboxEntry`, but the worker only reads
+/// `pending_outbox` reconstructs an `OutboxEntry`, but the worker only reads
 /// its `id`, `order_id`, and `effect` — `idempotency_key` was consumed the
 /// moment `commit` derived the row's id, so a fresh empty one here is
 /// harmless filler, not a lossy roundtrip.
@@ -333,11 +399,29 @@ fn dummy_idempotency_key(order_id: Uuid) -> IdempotencyKey {
     }
 }
 
-fn is_constraint_violation(e: &rusqlite::Error) -> bool {
+/// A duplicate is specifically a *key* conflict on `processed_events` — the
+/// unique index doing its job. Any other constraint failure is a real error.
+///
+/// The distinction only became load-bearing once `PRAGMA foreign_keys` was
+/// turned on: a plain `ConstraintViolation` check also swallows the foreign-key
+/// failure from an event whose order row does not exist, reporting it to
+/// `ingest` as "already applied" — which `ingest` treats as success. The event
+/// would be acknowledged and dropped instead of retried.
+///
+/// SQLite distinguishes them in the extended result code:
+/// `SQLITE_CONSTRAINT_PRIMARYKEY` (1555) and `SQLITE_CONSTRAINT_UNIQUE` (2067)
+/// are the index; `SQLITE_CONSTRAINT_FOREIGNKEY` (787) and the rest are not.
+fn is_duplicate_key(e: &rusqlite::Error) -> bool {
+    const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
+    const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
     matches!(
         e,
         rusqlite::Error::SqliteFailure(err, _)
             if err.code == rusqlite::ErrorCode::ConstraintViolation
+                && matches!(
+                    err.extended_code,
+                    SQLITE_CONSTRAINT_PRIMARYKEY | SQLITE_CONSTRAINT_UNIQUE
+                )
     )
 }
 
@@ -366,7 +450,7 @@ impl OrderStore for SqliteStore {
         );
         match insert_res {
             Ok(_) => {}
-            Err(e) if is_constraint_violation(&e) => {
+            Err(e) if is_duplicate_key(&e) => {
                 // Dropping `tx` here rolls the whole attempt back: the order
                 // row and the outbox are exactly as they were before.
                 return Ok(CommitResult::Duplicate);
@@ -385,11 +469,12 @@ impl OrderStore for SqliteStore {
         for entry in &result.effects {
             let effect_json = serde_json::to_string(&entry.effect).map_err(other)?;
             tx.execute(
-                "INSERT INTO outbox (id, order_id, effect, created_at, drained_at) \
-                 VALUES (?1,?2,?3,?4,NULL)",
+                "INSERT INTO outbox (id, order_id, provider, effect, created_at, drained_at) \
+                 VALUES (?1,?2,?3,?4,?5,NULL)",
                 params![
                     entry.id.to_string(),
                     entry.order_id.to_string(),
+                    entry.effect.scope().map(|(p, _)| p),
                     effect_json,
                     to_unix(result.order.updated_at),
                 ],
@@ -434,16 +519,22 @@ impl OrderCatalog for SqliteStore {
         Ok(())
     }
 
-    async fn claim_outbox(&self, limit: usize) -> Result<Vec<OutboxEntry>, PersistError> {
+    async fn pending_outbox(
+        &self,
+        provider: &str,
+        limit: usize,
+    ) -> Result<Vec<OutboxEntry>, PersistError> {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT id, order_id, effect FROM outbox WHERE drained_at IS NULL \
-                 ORDER BY created_at ASC LIMIT ?1",
+                "SELECT id, order_id, effect FROM outbox \
+                 WHERE drained_at IS NULL AND held_at IS NULL \
+                   AND (provider IS NULL OR provider = ?1) \
+                 ORDER BY created_at ASC, id ASC LIMIT ?2",
             )
             .map_err(other)?;
         let rows = stmt
-            .query_map(params![limit as i64], |r| {
+            .query_map(params![provider, limit as i64], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
             })
             .map_err(other)?;
@@ -474,11 +565,41 @@ impl OrderCatalog for SqliteStore {
         Ok(())
     }
 
+    async fn hold_row(
+        &self,
+        id: Uuid,
+        at: OffsetDateTime,
+        why: String,
+    ) -> Result<(), PersistError> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE outbox SET held_at=?1, held_why=?2 WHERE id=?3",
+            params![to_unix(at), why, id.to_string()],
+        )
+        .map_err(other)?;
+        Ok(())
+    }
+
+    /// SQL narrows to the orders that could possibly be due; the exact
+    /// finality check stays in Rust, where `Finality` is a type rather than a
+    /// JSON string to pattern-match. This used to select every order in the
+    /// table and issue a `load_order` per row — a full scan plus 2N queries on
+    /// every tick, with no index.
     async fn ids_needing_clock(&self, now: OffsetDateTime) -> Result<Vec<Uuid>, PersistError> {
         let conn = self.lock();
-        let mut stmt = conn.prepare("SELECT id FROM orders").map_err(other)?;
+        let cutoff = to_unix(now);
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT o.id FROM orders o \
+                 LEFT JOIN attempts a ON a.order_id = o.id \
+                 WHERE (o.status IN ('Pending','AwaitingPayment','Underpaid') \
+                        AND o.expires_at IS NOT NULL AND o.expires_at <= ?1) \
+                    OR (a.chargeback_window_ends IS NOT NULL \
+                        AND a.chargeback_window_ends <= ?1)",
+            )
+            .map_err(other)?;
         let ids: Vec<String> = stmt
-            .query_map([], |r| r.get::<_, String>(0))
+            .query_map(params![cutoff], |r| r.get::<_, String>(0))
             .map_err(other)?
             .collect::<Result<_, _>>()
             .map_err(other)?;
@@ -487,11 +608,15 @@ impl OrderCatalog for SqliteStore {
         let mut out = Vec::new();
         for id_s in ids {
             let id = Uuid::parse_str(&id_s).map_err(other)?;
-            let order = load_order(&conn, id)?;
-            let expired_unpaid = matches!(
-                order.status,
-                OrderStatus::Pending | OrderStatus::AwaitingPayment | OrderStatus::Underpaid
-            ) && order.expires_at.is_some_and(|end| end <= now);
+            // A row deleted between the select and the load is not a reason to
+            // abandon the rest of the sweep.
+            let order = match load_order(&conn, id) {
+                Ok(o) => o,
+                Err(PersistError::UnknownOrder(_)) => continue,
+                Err(e) => return Err(e),
+            };
+            let expired_unpaid =
+                order.status.is_awaiting_funds() && order.expires_at.is_some_and(|e| e <= now);
             let chargeback_due = order.attempts.iter().any(|a| {
                 a.chargeback_window_ends.is_some_and(|end| end <= now)
                     && !matches!(a.finality, Some(Finality::Final))

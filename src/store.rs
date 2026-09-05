@@ -64,8 +64,49 @@ pub trait OrderStore: Send + Sync {
 #[async_trait]
 pub trait OrderCatalog: OrderStore {
     async fn insert(&self, order: Order) -> Result<(), PersistError>;
-    async fn claim_outbox(&self, limit: usize) -> Result<Vec<crate::order::OutboxEntry>, PersistError>;
+
+    /// Undrained, unheld rows this worker is allowed to act on, oldest first.
+    ///
+    /// A read, not a lease — it takes no lock and marks nothing, so two workers
+    /// running concurrently against one store will both see the same rows. That
+    /// is survivable because every action behind it is idempotent
+    /// (`mark_fulfilled` is gated on the order's own state; `refund` is
+    /// idempotent on `refund_id`), but it is not a work queue and the name no
+    /// longer claims to be one.
+    ///
+    /// `provider` scopes the claim: a row carrying an [`Effect::scope`] is
+    /// claimable only by the worker holding that rail's backend, because
+    /// `drain_once` will otherwise send provider A's refund to backend B. Rows
+    /// with no scope are order-level instructions and any worker may take them
+    /// — `mark_fulfilled` is gated on the order's own state, so a second
+    /// worker reaching the same row changes nothing.
+    ///
+    /// [`Effect::scope`]: crate::order::Effect::scope
+    async fn pending_outbox(
+        &self,
+        provider: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::order::OutboxEntry>, PersistError>;
+
     async fn mark_drained(&self, id: Uuid, at: OffsetDateTime) -> Result<(), PersistError>;
+
+    /// Take a row out of the claim window *without* marking it done.
+    ///
+    /// `pending_outbox` is a `LIMIT n` window over undrained rows, so a row that
+    /// is never drained occupies a slot in every future window. `UnexpectedFunds`
+    /// is never drained by design — a human has to look — so `n` of them
+    /// permanently starve every `MayFulfill` and `RefundExcess` behind them:
+    /// fulfilment and refunds stop dead, and nothing errors while it happens.
+    ///
+    /// A held row is still there, still undrained, and still the human's work
+    /// queue. It is only out of the *worker's* way.
+    async fn hold_row(
+        &self,
+        id: Uuid,
+        at: OffsetDateTime,
+        why: String,
+    ) -> Result<(), PersistError>;
+
     async fn ids_needing_clock(&self, now: OffsetDateTime) -> Result<Vec<Uuid>, PersistError>;
 }
 
@@ -119,11 +160,10 @@ where
             continue;
         }
 
-        let order = match store.load(ev.order_id()).await {
-            Ok(o) => o,
-            Err(PersistError::UnknownOrder(id)) => return Err(PersistError::UnknownOrder(id)),
-            Err(e) => return Err(e),
-        };
+        // Every store failure propagates, `UnknownOrder` included: a webhook
+        // racing invoice creation must surface as an error the provider will
+        // retry, not a swallowed 2xx and not a dead letter.
+        let order = store.load(ev.order_id()).await?;
 
         match machine.apply(&order, ev, now) {
             Ok(result) => match store.commit(result).await? {

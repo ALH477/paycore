@@ -62,7 +62,9 @@ impl VerifiedBody {
     /// verification an explicit act that shows up in review and in grep,
     /// rather than an omission that looks like ordinary code.
     pub fn from_external_verification(body: &[u8], scheme: &'static str) -> Self {
-        debug_assert!(!scheme.is_empty(), "name the verification scheme");
+        // A real check, not a `debug_assert`: that is compiled out in release,
+        // which is the only build where it would have mattered.
+        assert!(!scheme.is_empty(), "name the verification scheme");
         Self { bytes: body.to_vec() }
     }
 

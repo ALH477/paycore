@@ -113,12 +113,21 @@ CREATE TABLE processed_events (
   PRIMARY KEY (order_id, provider, kind, provider_invoice_id, tx_ref)
 );
 
+-- `drained_at` and `held_at` are independent. Drained means done. Held means
+-- a human has to look, and takes the row out of the worker's claim window:
+-- `pending_outbox` is a LIMIT n read, so a row that is never drained would
+-- otherwise occupy a slot in every future window and starve everything behind
+-- it. `provider` is `Effect::scope()`'s provider, NULL for order-level
+-- instructions, so a worker only drains its own rail.
 CREATE TABLE outbox (
   id          uuid PRIMARY KEY,   -- derived; safe to retry
   order_id    uuid NOT NULL REFERENCES orders(id),
+  provider    text,
   effect      jsonb NOT NULL,
   created_at  timestamptz NOT NULL DEFAULT now(),
-  drained_at  timestamptz
+  drained_at  timestamptz,
+  held_at     timestamptz,
+  held_why    text
 );
 
 CREATE TABLE dead_letters (
@@ -141,23 +150,44 @@ rows in `seq` order, insert `outbox`. `MemoryStore` is the executable
 form of this. `paycore-sqlite` is the same protocol on a real unique
 index (`SqliteStore::open` / `open_in_memory`). A SQL store that updates
 `orders` without rewriting `attempts` is wrong. `processed_events.kind`
-is `EventKind::as_str()` (`Observed`, `Clock`, `Fulfill`, …).
+is `EventKind::as_str()` (`Observed`, `Clock`, `Fulfill`, …), and
+`orders.status` is `OrderStatus::as_str()` — plain tokens, not JSON, so the
+clock sweep can filter them in SQL.
+
+A duplicate is specifically a *key* conflict on `processed_events`. Treating
+any constraint violation as one also swallows a foreign-key failure from an
+event whose order row does not exist, and reports it as "already applied".
 
 Construct orders with `Order::try_new` (or `Order::new`, which panics on
-negative `due`). `due.minor < 0` is `InvalidAttempt`.
+negative `due`). `due.minor < 0` is `InvalidAttempt`. On an attempt both
+`quoted` and `covers` must be **positive**: `covers` is the denominator when
+converting an order-currency amount back to the rail, so a zero one makes every
+refund calculation on that order fail.
+
+`refunded_total` is bounded by what the attempt still holds. It is subtracted
+from the excess, so an inflated report would drive `outstanding_excess` to zero
+and quietly cancel money still owed to the payer.
 
 ## Worker
 
-`paycore-worker::drain_once` claims undrained outbox rows:
+`paycore-worker::drain_once` reads undrained, unheld outbox rows **scoped to
+its own backend's rail** — a scoped row drained by the wrong worker sends one
+provider's refund to another's API:
 
 - `MayFulfill` → `mark_fulfilled` then commit. `FulfillRejected` drains
   the row without shipping (stale instruction after a reversal).
 - `RefundExcess` → `PaymentBackend::refund`, then `ingest` of
-  `Settlement::Refunded`. `Unavailable` leaves the row for retry.
-  `RefundIdempotent` still ingests, so a crash after the rail refunded
-  but before drain still converges.
-- `UnexpectedFunds` is never auto-drained. A human has to look.
+  `Settlement::Refunded`. `Unavailable` leaves the row for retry, because it
+  is transient by contract. Any other error holds the row: it will fail the
+  same way on every retry, and leaving it would abort the pass and starve
+  every row behind it. `RefundIdempotent` still ingests, so a crash after the
+  rail refunded but before drain still converges.
+- `UnexpectedFunds` is never drained. A human has to look — so it is *held*,
+  which keeps it visible without letting it occupy a claim slot forever.
 - Other effects are informational and get marked drained.
+
+`pending_outbox` is a read, not a lease. Two workers on one store see the same
+rows; that is safe only because everything behind it is idempotent.
 
 `tick_clock` loads `ids_needing_clock` and applies `on_clock`.
 
@@ -170,7 +200,14 @@ negative `due`). `due.minor < 0` is `InvalidAttempt`.
 - `verify` before `decode`. Prefer `VerifiedBody::from_mac`, which does the
   constant-time compare for you.
 - Report `observed_total` as the provider's **cumulative** total for the
-  invoice, not the amount of `tx_ref`. `tx_ref` is key material only.
+  invoice, not the amount of `tx_ref`. `tx_ref` is key material only — and it
+  must vary with the *observation*, not with the invoice. A `tx_ref` that is
+  constant per invoice makes every observation after the first a duplicate, so
+  an invoice paid in instalments never leaves `Underpaid`.
+- `at` anchors the chargeback window. Never default it to the epoch when the
+  provider omits it: that opens a window which has already closed, and the next
+  clock tick declares the funds irreversible. `apply` clamps `at` to the ingest
+  clock, so a future-dated one cannot hold the window open either.
 - `Reversed.amount` and `Refunded.amount` are deltas, and both are
   magnitudes: never signed corrections. `apply` rejects a negative one
   outright — it would walk a summing accumulator backwards, and once `net`
@@ -180,7 +217,10 @@ negative `due`). `due.minor < 0` is `InvalidAttempt`.
   `refunded_total` never advances and a growing overpay will be refunded
   twice.
 - `refund` must be idempotent on `refund_id`, and `Settlement::Refunded`
-  must carry the `refund_id` the instruction named. It, not `tx_ref`, is
+  must carry the `refund_id` the instruction named. This is load-bearing, not
+  advisory: `refund_excess_id` deliberately reissues one id across distinct
+  outbox rows, so a driver that does not check for an already-executed refund
+  will pay twice. It, not `tx_ref`, is
   what the unique index collapses duplicate refund reports onto.
 - Never accept, log, or persist PAN.
 

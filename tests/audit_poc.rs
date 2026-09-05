@@ -219,3 +219,182 @@ fn regression_unknown_order_is_a_hard_error_not_a_dead_letter() {
     assert_eq!(store.dead.load(AOrd::SeqCst), 0, "not a permanent data problem — must not be dead-lettered");
     assert_eq!(store.ok.load(AOrd::SeqCst), 0);
 }
+
+// ---- F12: a provider-declared ending must not strand funds silently -------
+//
+// F6 fixed this for `on_clock`. The provider-declared endings kept the old
+// behaviour: terminal status, empty effect list, and the customer's partial
+// payment recorded on the attempt row and nowhere a human would look. BTCPay's
+// `InvoiceExpired` maps straight onto this arm, and an invoice expiring
+// part-paid is routine on-chain.
+#[test]
+fn regression_provider_expiry_of_a_partial_payment_is_recorded() {
+    let mm = m();
+    let partial = mm.apply(&order(100), &obs(60, "tx1", 10), t(10)).unwrap().order;
+    assert_eq!(partial.status, OrderStatus::Underpaid);
+
+    let ev = Settlement::Expired {
+        order_id: oid(),
+        provider: P.into(),
+        provider_invoice_id: "inv-1".into(),
+        at: t(50),
+    };
+    let ended = mm.apply(&partial, &ev, t(50)).unwrap();
+    assert_eq!(ended.order.status, OrderStatus::Expired);
+    assert_eq!(ended.order.observed().unwrap(), usd(60), "the 60 is still on the books");
+    assert!(
+        ended.effects.iter().any(|e| matches!(
+            &e.effect,
+            Effect::UnexpectedFunds { observed, .. } if *observed == usd(60)
+        )),
+        "money stranded by a provider expiry needs a human, exactly as a clock expiry does"
+    );
+}
+
+#[test]
+fn regression_provider_failure_of_a_partial_payment_is_recorded() {
+    let mm = m();
+    let partial = mm.apply(&order(100), &obs(60, "tx1", 10), t(10)).unwrap().order;
+    let ev = Settlement::Failed {
+        order_id: oid(),
+        provider: P.into(),
+        provider_invoice_id: "inv-1".into(),
+        code: "invalid".into(),
+        at: t(50),
+    };
+    let ended = mm.apply(&partial, &ev, t(50)).unwrap();
+    assert_eq!(ended.order.status, OrderStatus::Failed);
+    assert!(
+        ended.effects.iter().any(|e| matches!(&e.effect, Effect::UnexpectedFunds { .. })),
+        "a failed invoice holding funds is not an empty effect list"
+    );
+}
+
+// ---- F16: a future-dated provider timestamp cannot hold the window open ---
+#[test]
+fn regression_chargeback_anchor_never_runs_past_the_ingest_clock() {
+    let mm = OrderMachine::new(StaticPolicy::new(1, Some(Duration::days(180))));
+    // A provider reporting `at` a year out would pin the window a year and a
+    // half away, and the order could never be promoted to Final or shipped.
+    let far_future = obs(100, "tx1", 10_000 + 365 * 86_400);
+    let funded = mm.apply(&order(100), &far_future, t(10)).unwrap().order;
+
+    let ends = funded.attempts[0].chargeback_window_ends.expect("window opens on the full payment");
+    assert_eq!(
+        ends,
+        t(10) + Duration::days(180),
+        "the anchor is clamped to the ingest clock, not taken from the payload"
+    );
+    assert!(mm.on_clock(&funded, t(10) + Duration::days(181)).is_some(), "and it does close");
+}
+
+#[test]
+fn chargeback_anchor_keeps_a_past_timestamp() {
+    let mm = OrderMachine::new(StaticPolicy::new(1, Some(Duration::days(180))));
+    // The rail measures its window from the transaction, so a delayed webhook
+    // or a reconcile replay of real history must not restart the clock.
+    let funded = mm.apply(&order(100), &obs(100, "tx1", 10), t(5_000)).unwrap().order;
+    assert_eq!(funded.attempts[0].chargeback_window_ends, Some(t(10) + Duration::days(180)));
+}
+
+// ---- F17: the clock promotion key was a non-injective separator join ------
+#[test]
+fn regression_clock_promotion_key_is_injective_across_invoice_ids() {
+    let mm = OrderMachine::new(StaticPolicy::new(1, Some(Duration::days(1))));
+
+    // Two orders whose promoted attempt-id sets differ only in where the comma
+    // falls. Joined with `","` both produce `window-closed:a,b`, so the second
+    // commits as Duplicate and its finality promotion is lost for good.
+    let key_for = |ids: &[&str]| {
+        let mut o = Order::new(oid(), usd(100), t(0));
+        for id in ids {
+            o.open_attempt(Attempt::same_currency(P, *id, usd(100)).unwrap()).unwrap();
+        }
+        o.status = OrderStatus::AwaitingPayment;
+        for id in ids {
+            o = mm.apply(&o, &obs_p(100, "tx", id, P, 10), t(10)).unwrap().order;
+        }
+        mm.on_clock(&o, t(10) + Duration::days(2)).expect("windows close").key
+    };
+
+    assert_ne!(key_for(&["a,b"]), key_for(&["a", "b"]));
+}
+
+#[test]
+fn regression_clock_promotion_key_is_bounded() {
+    let mm = OrderMachine::new(StaticPolicy::new(1, Some(Duration::days(1))));
+    let long: Vec<String> = (0..8).map(|i| format!("{}{i}", "x".repeat(MAX_ID_LEN - 1))).collect();
+    let mut o = Order::new(oid(), usd(800), t(0));
+    for id in &long {
+        o.open_attempt(Attempt::same_currency(P, id.as_str(), usd(100)).unwrap()).unwrap();
+    }
+    o.status = OrderStatus::AwaitingPayment;
+    for id in &long {
+        o = mm.apply(&o, &obs_p(100, "tx", id, P, 10), t(10)).unwrap().order;
+    }
+    let key = mm.on_clock(&o, t(10) + Duration::days(2)).unwrap().key;
+    assert!(
+        key.tx_ref.len() <= MAX_ID_LEN,
+        "a machine-minted key never passes through `validate`, so it must be bounded by \
+         construction: got {} bytes",
+        key.tx_ref.len()
+    );
+}
+
+// ---- F18: a zero-`covers` attempt wedged the order permanently ------------
+//
+// `covers` is the denominator in `to_rail_currency`, which `funding_effects`
+// calls for every attempt holding refundable funds. A zero one made that error,
+// so every subsequent observation on the order was dead-lettered with no way
+// back. `quoted` was already required to be positive; `covers` was not.
+#[test]
+fn regression_zero_covers_attempt_is_rejected_at_construction() {
+    let err = Attempt::new(P, "inv-1", Money::new(100, "BTC"), usd(0));
+    assert!(matches!(err, Err(MachineError::InvalidAttempt { .. })), "{err:?}");
+    assert!(Attempt::new(P, "inv-1", Money::new(100, "BTC"), usd(1)).is_ok());
+}
+
+// ---- F20: `refunded_total` was unbounded ----------------------------------
+//
+// It sums, and it is subtracted from the excess, so an inflated report drives
+// `outstanding_excess` to zero and the payer's real excess is never sent back.
+// No effect, no dead letter, no status change — a silent loss on the customer's
+// side of the ledger.
+#[test]
+fn regression_refund_cannot_exceed_what_the_attempt_holds() {
+    let mm = m();
+    let overpaid = mm.apply(&order(100), &obs(150, "tx1", 10), t(10)).unwrap().order;
+    assert_eq!(overpaid.outstanding_excess().unwrap(), usd(50));
+
+    let inflated = Settlement::Refunded {
+        order_id: oid(),
+        provider: P.into(),
+        provider_invoice_id: "inv-1".into(),
+        tx_ref: "r1".into(),
+        refund_id: Uuid::from_u128(9),
+        amount: usd(500),
+        at: t(20),
+    };
+    assert!(matches!(
+        mm.apply(&overpaid, &inflated, t(20)),
+        Err(MachineError::RefundExceedsHeld { .. })
+    ));
+    assert_eq!(
+        overpaid.outstanding_excess().unwrap(),
+        usd(50),
+        "the excess the payer is owed is untouched by the rejected report"
+    );
+
+    // The genuine refund of that excess is still accepted.
+    let real = Settlement::Refunded {
+        order_id: oid(),
+        provider: P.into(),
+        provider_invoice_id: "inv-1".into(),
+        tx_ref: "r2".into(),
+        refund_id: Uuid::from_u128(10),
+        amount: usd(50),
+        at: t(20),
+    };
+    let done = mm.apply(&overpaid, &real, t(20)).unwrap().order;
+    assert_eq!(done.outstanding_excess().unwrap(), usd(0));
+}

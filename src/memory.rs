@@ -25,10 +25,20 @@ pub struct DeadLetter {
     pub why: String,
 }
 
+/// An outbox row and the two independent reasons a worker might pass it by.
+/// `drained` means done; `held` means it needs a human and must not occupy a
+/// slot in the claim window while it waits for one.
+struct Row {
+    entry: OutboxEntry,
+    drained_at: Option<OffsetDateTime>,
+    held_at: Option<OffsetDateTime>,
+    held_why: Option<String>,
+}
+
 struct Inner {
     orders: HashMap<Uuid, Order>,
     processed: HashSet<IdempotencyKey>,
-    outbox: Vec<(OutboxEntry, Option<OffsetDateTime>)>,
+    outbox: Vec<Row>,
     dead: Vec<DeadLetter>,
 }
 
@@ -70,7 +80,18 @@ impl MemoryStore {
     }
 
     pub fn outbox(&self) -> Vec<OutboxEntry> {
-        self.lock().outbox.iter().map(|(e, _)| e.clone()).collect()
+        self.lock().outbox.iter().map(|r| r.entry.clone()).collect()
+    }
+
+    /// Rows parked for a human: never drained, and deliberately out of the
+    /// worker's claim window. This is the review queue.
+    pub fn held(&self) -> Vec<(OutboxEntry, String)> {
+        self.lock()
+            .outbox
+            .iter()
+            .filter(|r| r.held_at.is_some())
+            .map(|r| (r.entry.clone(), r.held_why.clone().unwrap_or_default()))
+            .collect()
     }
 
     pub fn dead_letters(&self) -> Vec<DeadLetter> {
@@ -93,7 +114,12 @@ impl OrderStore for MemoryStore {
             return Err(PersistError::UnknownOrder(result.order.id));
         }
         g.processed.insert(result.key);
-        g.outbox.extend(result.effects.into_iter().map(|e| (e, None)));
+        g.outbox.extend(result.effects.into_iter().map(|entry| Row {
+            entry,
+            drained_at: None,
+            held_at: None,
+            held_why: None,
+        }));
         g.orders.insert(result.order.id, result.order);
         Ok(CommitResult::Applied)
     }
@@ -120,20 +146,38 @@ impl OrderCatalog for MemoryStore {
         MemoryStore::insert(self, order)
     }
 
-    async fn claim_outbox(&self, limit: usize) -> Result<Vec<OutboxEntry>, PersistError> {
+    async fn pending_outbox(
+        &self,
+        provider: &str,
+        limit: usize,
+    ) -> Result<Vec<OutboxEntry>, PersistError> {
         Ok(self
             .lock()
             .outbox
             .iter()
-            .filter(|(_, drained_at)| drained_at.is_none())
+            .filter(|r| r.drained_at.is_none() && r.held_at.is_none())
+            .filter(|r| r.entry.effect.scope().map_or(true, |(p, _)| p == provider))
             .take(limit)
-            .map(|(e, _)| e.clone())
+            .map(|r| r.entry.clone())
             .collect())
     }
 
     async fn mark_drained(&self, id: Uuid, at: OffsetDateTime) -> Result<(), PersistError> {
-        if let Some((_, drained_at)) = self.lock().outbox.iter_mut().find(|(e, _)| e.id == id) {
-            *drained_at = Some(at);
+        if let Some(row) = self.lock().outbox.iter_mut().find(|r| r.entry.id == id) {
+            row.drained_at = Some(at);
+        }
+        Ok(())
+    }
+
+    async fn hold_row(
+        &self,
+        id: Uuid,
+        at: OffsetDateTime,
+        why: String,
+    ) -> Result<(), PersistError> {
+        if let Some(row) = self.lock().outbox.iter_mut().find(|r| r.entry.id == id) {
+            row.held_at = Some(at);
+            row.held_why = Some(why);
         }
         Ok(())
     }
@@ -267,11 +311,11 @@ mod tests {
         store.insert(order(100)).unwrap();
         let mm = m();
         pollster::block_on(ingest(&mm, &store, P, &[obs(100, "tx-a")], b"", t(10))).unwrap();
-        let first = pollster::block_on(store.claim_outbox(32)).unwrap();
+        let first = pollster::block_on(store.pending_outbox(P, 32)).unwrap();
         assert!(!first.is_empty());
         let id = first[0].id;
         pollster::block_on(store.mark_drained(id, t(11))).unwrap();
-        let second = pollster::block_on(store.claim_outbox(32)).unwrap();
+        let second = pollster::block_on(store.pending_outbox(P, 32)).unwrap();
         assert!(second.iter().all(|e| e.id != id));
     }
 

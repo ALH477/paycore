@@ -29,7 +29,10 @@ pub struct DrainStats {
     pub fulfilled: u32,
     pub stale: u32,
     pub refunded: u32,
+    /// Left in the claim window on purpose: the provider said `Unavailable`,
+    /// which is transient by contract, so the next pass tries again.
     pub retries: u32,
+    /// Parked for a human and taken out of the claim window.
     pub held: u32,
     pub acked: u32,
 }
@@ -48,7 +51,12 @@ where
 {
     let mut stats = DrainStats::default();
 
-    for entry in store.claim_outbox(limit).await? {
+    // Scoped to this backend's rail. An unscoped row is an order-level
+    // instruction any worker may take; a scoped one belongs to the worker
+    // holding that provider's backend, or `refund` goes to the wrong rail and
+    // the `Refunded` that follows is dead-lettered for a provider mismatch —
+    // leaving `refunded_total` behind and the same excess refunded twice.
+    for entry in store.pending_outbox(backend.name(), limit).await? {
         let OutboxEntry { id, order_id, effect, .. } = entry;
 
         match effect {
@@ -91,14 +99,32 @@ where
                         store.mark_drained(id, now).await?;
                         stats.refunded += 1;
                     }
+                    // Transient by contract: leave the row for the next pass.
                     Err(PayError::Unavailable) => {
                         stats.retries += 1;
                     }
-                    Err(e) => return Err(e.into()),
+                    // Anything else will fail again on every retry — an amount
+                    // the driver cannot express, a rejected request — so it is
+                    // parked rather than left to abort the loop and starve
+                    // every row queued behind it.
+                    Err(e) => {
+                        store.hold_row(id, now, format!("refund failed: {e}")).await?;
+                        stats.held += 1;
+                    }
                 }
             }
 
-            Effect::UnexpectedFunds { .. } => {
+            // Never drained: money arrived against an order that had already
+            // ended, and a human has to decide what happens to it. Held so it
+            // stops occupying a slot in every future claim window.
+            Effect::UnexpectedFunds { provider, provider_invoice_id, .. } => {
+                store
+                    .hold_row(
+                        id,
+                        now,
+                        format!("unexpected funds on {provider}/{provider_invoice_id}"),
+                    )
+                    .await?;
                 stats.held += 1;
             }
 

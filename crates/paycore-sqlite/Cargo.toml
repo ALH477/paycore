@@ -15,4 +15,5 @@ uuid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 pollster = "1"
+tempfile = "3"
 paycore-worker = { path = "../paycore-worker" }

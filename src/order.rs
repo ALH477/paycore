@@ -33,6 +33,53 @@ pub enum OrderStatus {
 }
 
 impl OrderStatus {
+    /// The stable wire token, matching [`EventKind::as_str`]'s contract: a
+    /// column value that can be read, indexed, and filtered in SQL. Storing
+    /// `serde_json` instead put a quoted `"\"Paid\""` in a `text` column.
+    ///
+    /// [`EventKind::as_str`]: crate::settlement::EventKind::as_str
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OrderStatus::Pending => "Pending",
+            OrderStatus::AwaitingPayment => "AwaitingPayment",
+            OrderStatus::Paid => "Paid",
+            OrderStatus::Overpaid => "Overpaid",
+            OrderStatus::Underpaid => "Underpaid",
+            OrderStatus::Fulfilled => "Fulfilled",
+            OrderStatus::Recalled => "Recalled",
+            OrderStatus::Disputed => "Disputed",
+            OrderStatus::Reversed => "Reversed",
+            OrderStatus::Expired => "Expired",
+            OrderStatus::Failed => "Failed",
+        }
+    }
+
+    pub fn from_str_exact(s: &str) -> Option<Self> {
+        match s {
+            "Pending" => Some(OrderStatus::Pending),
+            "AwaitingPayment" => Some(OrderStatus::AwaitingPayment),
+            "Paid" => Some(OrderStatus::Paid),
+            "Overpaid" => Some(OrderStatus::Overpaid),
+            "Underpaid" => Some(OrderStatus::Underpaid),
+            "Fulfilled" => Some(OrderStatus::Fulfilled),
+            "Recalled" => Some(OrderStatus::Recalled),
+            "Disputed" => Some(OrderStatus::Disputed),
+            "Reversed" => Some(OrderStatus::Reversed),
+            "Expired" => Some(OrderStatus::Expired),
+            "Failed" => Some(OrderStatus::Failed),
+            _ => None,
+        }
+    }
+
+    /// Statuses a payment can still arrive against and change the outcome.
+    /// Shared with the store's clock sweep so the two cannot disagree.
+    pub fn is_awaiting_funds(self) -> bool {
+        matches!(
+            self,
+            OrderStatus::Pending | OrderStatus::AwaitingPayment | OrderStatus::Underpaid
+        )
+    }
+
     /// Nothing further changes these. Funds arriving against one are still
     /// recorded, but as `UnexpectedFunds`, not as progress.
     pub fn is_closed(&self) -> bool {
@@ -98,8 +145,13 @@ impl Attempt {
         if quoted.minor <= 0 {
             return Err(MachineError::InvalidAttempt { why: "quoted must be positive" });
         }
-        if covers.minor < 0 {
-            return Err(MachineError::InvalidAttempt { why: "covers must not be negative" });
+        // Positive, not merely non-negative, and for the same reason `quoted`
+        // is: `covers` is the denominator in `to_rail_currency`, so a zero one
+        // makes `scale_to` error. `funding_effects` calls that for every
+        // attempt holding refundable funds, which would dead-letter every
+        // later observation on the order with no way back.
+        if covers.minor <= 0 {
+            return Err(MachineError::InvalidAttempt { why: "covers must be positive" });
         }
         let rail = quoted.currency.clone();
         Ok(Self {
@@ -413,6 +465,26 @@ pub struct OutboxEntry {
     pub order_id: Uuid,
     pub idempotency_key: IdempotencyKey,
     pub effect: Effect,
+}
+
+/// Money sitting on an order that is ending, in the order it was invoiced.
+///
+/// One definition, used everywhere an order reaches a terminal state — the
+/// clock's expiry sweep and both provider-declared endings. The provider paths
+/// used to end an order with an empty effect list, so a customer's partial
+/// payment on an invoice that expired or failed was recorded on the attempt row
+/// and nowhere a human would ever look.
+pub(crate) fn stranded_funds(order: &Order) -> Vec<Effect> {
+    order
+        .attempts
+        .iter()
+        .filter(|a| a.observed_total.minor > 0 || a.is_funding())
+        .map(|a| Effect::UnexpectedFunds {
+            provider: a.provider.clone(),
+            provider_invoice_id: a.provider_invoice_id.clone(),
+            observed: a.observed_total.clone(),
+        })
+        .collect()
 }
 
 pub(crate) fn to_outbox(

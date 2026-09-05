@@ -9,11 +9,13 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::order::{
-    derive_status, funding_status, to_outbox, Effect, Order, OrderStatus, OutboxEntry,
+    derive_status, funding_status, stranded_funds, to_outbox, Effect, Order, OrderStatus,
+    OutboxEntry,
 };
 use crate::policy::FulfillmentPolicy;
 use crate::settlement::{
-    refund_excess_id, EventKind, Finality, IdempotencyKey, ReversalKind, ReversalReason, Settlement,
+    promoted_set_ref, refund_excess_id, EventKind, Finality, IdempotencyKey, ReversalKind,
+    ReversalReason, Settlement,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -30,6 +32,8 @@ pub enum MachineError {
     FulfillRejected { why: &'static str },
     #[error("negative amount on {event}: {minor}")]
     NegativeAmount { event: &'static str, minor: i64 },
+    #[error("refund of {amount} exceeds the {held} this attempt still holds")]
+    RefundExceedsHeld { amount: i64, held: i64 },
     #[error("invalid attempt: {why}")]
     InvalidAttempt { why: &'static str },
     #[error("no attempt {provider}/{provider_invoice_id} on this order")]
@@ -80,14 +84,15 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
         match event {
             Settlement::Reversed { amount, .. }
             | Settlement::Refunded { amount, .. }
-            | Settlement::Disputed { amount, .. } => {
-                if amount.minor < 0 {
-                    return Err(MachineError::NegativeAmount {
-                        event: event.name(),
-                        minor: amount.minor,
-                    });
-                }
+            | Settlement::Disputed { amount, .. }
+                if amount.minor < 0 =>
+            {
+                return Err(MachineError::NegativeAmount {
+                    event: event.name(),
+                    minor: amount.minor,
+                })
             }
+            // A non-negative delta falls through here, as does `Observed`:
             // `observed_total` is max-joined, not summed, so a negative one
             // is absorbed by the join and cannot move the accumulator.
             _ => {}
@@ -137,7 +142,16 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
                 if attempt.chargeback_window_ends.is_none()
                     && attempt.net()?.cmp_amount(&attempt.quoted)? != Ordering::Less
                 {
-                    attempt.chargeback_window_ends = self.policy.chargeback_window(provider, *at);
+                    // `at` is provider-supplied and gates when funds become
+                    // irreversible, so it is never allowed past the ingest
+                    // clock: a future-dated timestamp would hold the window
+                    // open forever and the order could never ship. An `at` in
+                    // the past is kept — the rail measures its window from the
+                    // transaction, and a delayed webhook or a reconcile replay
+                    // of real history must not have its clock restarted.
+                    let anchor = (*at).min(now);
+                    attempt.chargeback_window_ends =
+                        self.policy.chargeback_window(provider, anchor);
                 }
 
                 let fx = self.funding_effects(&next)?;
@@ -189,6 +203,18 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
                 if !order.status.is_closed() =>
             {
                 let attempt = next.attempt_mut(provider, provider_invoice_id)?;
+                // `refunded_total` sums and is subtracted from the excess, so
+                // an inflated report drives `outstanding_excess` to zero and
+                // the payer's real excess is never sent back — a silent loss
+                // with no effect and no dead letter. Bounded here, before any
+                // state is touched, so a driver bug dead-letters instead.
+                let held = attempt.refundable()?;
+                if amount.cmp_amount(&held)? == Ordering::Greater {
+                    return Err(MachineError::RefundExceedsHeld {
+                        amount: amount.minor,
+                        held: held.minor,
+                    });
+                }
                 attempt.refunded_total = attempt.refunded_total.add(amount)?;
                 attempt.last_tx_ref = Some(event.tx_ref().to_string());
                 (Status::Derive, vec![])
@@ -282,7 +308,7 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
                             | OrderStatus::Underpaid
                     )
                 {
-                    (Status::Set(OrderStatus::Expired), vec![])
+                    (Status::Set(OrderStatus::Expired), stranded_funds(&next))
                 } else {
                     next.attempt_mut(provider, provider_invoice_id)?.expires_at = Some(*at);
                     (Status::Set(order.status), vec![])
@@ -305,7 +331,7 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
                             | OrderStatus::Underpaid
                     )
                 {
-                    (Status::Set(OrderStatus::Failed), vec![])
+                    (Status::Set(OrderStatus::Failed), stranded_funds(&next))
                 } else {
                     (Status::Set(order.status), vec![])
                 }
@@ -374,38 +400,26 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
         {
             next.status = OrderStatus::Expired;
 
-            let effects: Vec<Effect> = order
-                .attempts
-                .iter()
-                .filter(|a| {
-                    a.observed_total.minor > 0
-                        || a.net().map(|n| n.is_positive()).unwrap_or(false)
-                })
-                .map(|a| Effect::UnexpectedFunds {
-                    provider: a.provider.clone(),
-                    provider_invoice_id: a.provider_invoice_id.clone(),
-                    observed: a.observed_total.clone(),
-                })
-                .collect();
+            let effects = stranded_funds(order);
 
             let key = order_key(order, EventKind::Clock, format!("expire:{}", order.id));
             next.updated_at = now;
             return Some(ApplyResult { effects: to_outbox(&key, next.id, effects), order: next, key });
         }
 
-        let mut promoted_ids: Vec<String> = Vec::new();
+        let mut promoted: Vec<(String, String)> = Vec::new();
         for a in next.attempts.iter_mut() {
             if a.chargeback_window_ends.is_some_and(|end| now >= end)
                 && !matches!(a.finality, Some(Finality::Final))
             {
                 a.finality = Some(Finality::Final);
-                promoted_ids.push(a.provider_invoice_id.clone());
+                promoted.push((a.provider.clone(), a.provider_invoice_id.clone()));
             }
         }
-        if promoted_ids.is_empty() {
+        if promoted.is_empty() {
             return None;
         }
-        promoted_ids.sort();
+        promoted.sort();
 
         let effects = if next.fulfilled_at.is_some() {
             vec![Effect::MarkSettled]
@@ -423,11 +437,9 @@ impl<P: FulfillmentPolicy> OrderMachine<P> {
             vec![]
         };
 
-        let key = order_key(
-            order,
-            EventKind::Clock,
-            format!("window-closed:{}", promoted_ids.join(",")),
-        );
+        let pairs: Vec<(&str, &str)> =
+            promoted.iter().map(|(p, i)| (p.as_str(), i.as_str())).collect();
+        let key = order_key(order, EventKind::Clock, promoted_set_ref(&pairs));
         next.updated_at = now;
         Some(ApplyResult { effects: to_outbox(&key, next.id, effects), order: next, key })
     }

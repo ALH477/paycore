@@ -343,6 +343,27 @@ impl IdempotencyKey {
     }
 }
 
+/// Names the set of attempts a clock tick promoted to `Final`.
+///
+/// The parts are provider-supplied, so they go through [`canonical`] rather
+/// than a separator join: with `","`, the sets `["a,b"]` and `["a", "b"]`
+/// produce one string, the second promotion commits as `Duplicate`, and the
+/// finality promotion is silently lost — the attempt never reaches `Final` and
+/// the order never ships. Hashing also bounds the result, which a join does
+/// not: N attempts times `MAX_ID_LEN` outgrows the `tx_ref` column, and a key
+/// the machine mints itself never passes through `validate`.
+///
+/// `provider` is included because an invoice id is only unique within one.
+pub(crate) fn promoted_set_ref(pairs: &[(&str, &str)]) -> String {
+    let mut parts: Vec<&str> = Vec::with_capacity(pairs.len() * 2 + 1);
+    parts.push("window-closed");
+    for (provider, invoice) in pairs {
+        parts.push(provider);
+        parts.push(invoice);
+    }
+    format!("window-closed:{}", Uuid::new_v5(&NS_DERIVED, &canonical(&parts)))
+}
+
 /// Identifies "the refund that sends `amount` back through this invoice".
 ///
 /// Keyed on everything the amount is a pure function of, and nothing else.
